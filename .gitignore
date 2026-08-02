@@ -1,0 +1,11 @@
+# Foundry build artifacts and local cache
+out/
+cache/
+
+# Local deployment simulation and broadcast logs
+broadcast/
+
+# Local environment variables
+.env
+.env.*
+!.env.example
