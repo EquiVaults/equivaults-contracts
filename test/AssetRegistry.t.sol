@@ -2,42 +2,10 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {AssetRegistry} from "../src/AssetRegistry.sol";
-import {IPriceOracle} from "../src/interfaces/IPriceOracle.sol";
 
-contract MockToken is ERC20 {
-    uint8 private immutable _tokenDecimals;
-
-    constructor(uint8 tokenDecimals) ERC20("Mock Token", "MOCK") {
-        _tokenDecimals = tokenDecimals;
-    }
-
-    function decimals() public view override returns (uint8) {
-        return _tokenDecimals;
-    }
-}
-
-contract MockOracle is IPriceOracle {
-    uint256 internal _price;
-    uint256 internal _updatedAt;
-    bool internal _fails;
-
-    function setPrice(uint256 price, uint256 updatedAt) external {
-        _price = price;
-        _updatedAt = updatedAt;
-    }
-
-    function setFails(bool fails) external {
-        _fails = fails;
-    }
-
-    function getPrice(address, address) external view returns (uint256, uint256) {
-        require(!_fails, "oracle unavailable");
-        return (_price, _updatedAt);
-    }
-}
+import {MockOracle, MockToken} from "./mocks/Mocks.sol";
 
 contract AssetRegistryTest is Test {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
