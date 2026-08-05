@@ -37,6 +37,18 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     uint256 public constant MAX_TIMELOCK_DELAY = 7 days;
     uint16 public constant MANAGER_FEE_SHARE_BPS = 9_000; // 90 %
 
+    // Rebalance parameters. The drift threshold (1-10 points, default 3) gates when the basket is
+    // rebalanceable; the collective slippage (0.1-3 %, default 1 %) bounds every rebalance swap.
+    // Both change only through a parameter update proposal executed via the vault timelock.
+    uint16 public constant MIN_DRIFT_BPS = 100; // 1 point
+    uint16 public constant MAX_DRIFT_BPS = 1_000; // 10 points
+    uint16 public constant DEFAULT_DRIFT_BPS = 300; // 3 points
+    uint16 public constant MIN_REBALANCE_SLIPPAGE_BPS = 10; // 0.1 %
+    uint16 public constant MAX_REBALANCE_SLIPPAGE_BPS = 300; // 3 %
+    uint16 public constant DEFAULT_REBALANCE_SLIPPAGE_BPS = 100; // 1 %
+    uint256 public constant MAX_GAS_REBATE_USDC = 5e6; // absolute USDC cap per rebalance (5 USDC)
+    uint256 public constant ETH_USDC_PRICE_CAP = 5_000e6; // protocol-fixed ETH price cap, USDC wei per ETH
+
     /// @dev Trust mode chosen at creation and immutable afterwards.
     enum TimelockMode {
         Instant, // proposals are executable immediately
@@ -51,6 +63,21 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         address[] assets;
         uint16[] weightsBps;
         uint256 capAum;
+    }
+
+    /// @dev Single active rebalance-parameter proposal; `id == 0` means none pending. Mutually
+    /// exclusive with a reallocation proposal: only one pending change at a time.
+    struct ParameterProposal {
+        uint256 id;
+        uint256 executableAt;
+        uint16 driftThresholdBps;
+        uint16 rebalanceSlippageBps;
+    }
+
+    /// @dev Executor-supplied constraints for `rebalance()`.
+    struct RebalanceParams {
+        uint256 deadline; // swaps revert past this timestamp
+        uint256[] minAmountsOut; // per basket asset; 0 = vault default bound, any value below the default reverts
     }
 
     address public immutable manager;
@@ -71,6 +98,14 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
     uint256 public proposalCounter;
     ReallocationProposal internal _activeProposal;
+
+    /// @notice Drift threshold in bps (1-10 points) above which the basket is rebalanceable.
+    uint16 public driftThresholdBps;
+
+    /// @notice Collective slippage bound in bps (0.1-3 %) applied to every rebalance swap by default.
+    uint16 public rebalanceSlippageBps;
+
+    ParameterProposal internal _activeParameterProposal;
 
     /// @notice Cumulative USDC contributed by each shareholder, minus the realized cost of redeemed shares.
     /// @dev Average cost basis per share = costBasis[account] / balanceOf(account); shares are
@@ -102,6 +137,11 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     error ProposalIdMismatch(uint256 activeId, uint256 proposalId);
     error DepositRequiresConsent(uint256 proposalId);
     error AssetNotAdmissible(address asset);
+    error InvalidDriftThreshold(uint16 driftBps);
+    error InvalidRebalanceSlippage(uint16 slippageBps);
+    error DriftBelowThreshold(uint256 maxDeviationBps, uint16 thresholdBps);
+    error DeadlineExpired(uint256 timestamp);
+    error RebalanceMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
 
     event PerformanceFeeCollected(
         address indexed manager,
@@ -123,6 +163,25 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     event ReallocationCancelled(uint256 indexed id);
 
     event ReallocationExecuted(uint256 indexed id, address[] assets, uint16[] weightsBps, uint256 capAum);
+
+    event ParameterUpdateProposed(
+        uint256 indexed id, uint256 executableAt, uint16 driftThresholdBps, uint16 rebalanceSlippageBps
+    );
+
+    event ParameterUpdateCancelled(uint256 indexed id);
+
+    event ParameterUpdateExecuted(uint256 indexed id, uint16 driftThresholdBps, uint16 rebalanceSlippageBps);
+
+    /// @notice Emitted after a successful rebalance: net USDC sold/bought, gas reimbursed to the
+    /// executor and the basket weights before/after (bps of NAV).
+    event Rebalanced(
+        address indexed executor,
+        uint256 gasRebate,
+        uint256 soldValueUsdc,
+        uint256 boughtValueUsdc,
+        uint256[] weightsBeforeBps,
+        uint256[] weightsAfterBps
+    );
 
     constructor(
         IERC20 usdc,
@@ -169,6 +228,13 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint256 aumBound = _maxVaultAumBound(assets, weightsBps);
         if (capAum_ == 0 || capAum_ > aumBound) revert InvalidAumCap(capAum_, aumBound);
         capAum = capAum_;
+
+        // Rebalance parameters default to 3 drift points and 1 % collective slippage; both change
+        // only through a parameter update proposal executed via the vault timelock. The slippage
+        // default never exceeds the vault's own `maxSlippageBps` bound.
+        driftThresholdBps = DEFAULT_DRIFT_BPS;
+        rebalanceSlippageBps =
+            maxSlippageBps_ < DEFAULT_REBALANCE_SLIPPAGE_BPS ? maxSlippageBps_ : DEFAULT_REBALANCE_SLIPPAGE_BPS;
     }
 
     // ---------------------------------------------------------------------
@@ -340,6 +406,12 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         return _activeProposal;
     }
 
+    /// @notice Returns the single active rebalance-parameter proposal, or an empty one
+    /// (`id == 0`) when none is pending.
+    function activeParameterProposal() external view returns (ParameterProposal memory) {
+        return _activeParameterProposal;
+    }
+
     /// @notice Proposes a new basket (assets/weights) and AUM cap, gated by the vault trust mode.
     /// @dev `assets_` must be 1-5 registered and Active assets, weights each >= 5 % summing to 100 %,
     /// and `capAum_` bounded by the registry exposure ceiling. A vault in `Immutable` mode refuses
@@ -351,6 +423,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     {
         if (timelockMode == TimelockMode.Immutable) revert TimelockImmutable();
         if (_activeProposal.id != 0) revert ProposalAlreadyActive(_activeProposal.id);
+        if (_activeParameterProposal.id != 0) revert ProposalAlreadyActive(_activeParameterProposal.id);
 
         _validateReallocationTarget(assets_, weightsBps_, capAum_);
 
@@ -392,6 +465,112 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         capAum = proposal.capAum;
         delete _activeProposal;
         emit ReallocationExecuted(proposal.id, proposal.assets, proposal.weightsBps, proposal.capAum);
+    }
+
+    // ---------------------------------------------------------------------
+    // Rebalance parameter updates
+    // ---------------------------------------------------------------------
+
+    /// @notice Proposes new drift threshold and collective slippage, gated by the vault trust mode
+    /// exactly like a basket reallocation: immutable vaults refuse forever, delayed vaults wait
+    /// `timelockDelay`, and only one pending change (basket or parameters) is allowed at a time.
+    function proposeParameters(uint16 driftThresholdBps_, uint16 rebalanceSlippageBps_) external onlyManager {
+        if (timelockMode == TimelockMode.Immutable) revert TimelockImmutable();
+        if (_activeParameterProposal.id != 0) revert ProposalAlreadyActive(_activeParameterProposal.id);
+        if (_activeProposal.id != 0) revert ProposalAlreadyActive(_activeProposal.id);
+
+        _validateRebalanceParams(driftThresholdBps_, rebalanceSlippageBps_);
+
+        uint256 id = ++proposalCounter;
+        uint256 executableAt =
+            timelockMode == TimelockMode.Instant ? block.timestamp : block.timestamp + timelockDelay;
+        _activeParameterProposal = ParameterProposal({
+            id: id,
+            executableAt: executableAt,
+            driftThresholdBps: driftThresholdBps_,
+            rebalanceSlippageBps: rebalanceSlippageBps_
+        });
+        emit ParameterUpdateProposed(id, executableAt, driftThresholdBps_, rebalanceSlippageBps_);
+    }
+
+    function cancelParameterUpdate() external onlyManager {
+        if (_activeParameterProposal.id == 0) revert NoActiveProposal();
+        uint256 id = _activeParameterProposal.id;
+        delete _activeParameterProposal;
+        emit ParameterUpdateCancelled(id);
+    }
+
+    /// @dev Permissionless once `executableAt` is reached; applies the proposed parameters.
+    function executeParameterUpdate() external nonReentrant {
+        ParameterProposal memory proposal = _activeParameterProposal;
+        if (proposal.id == 0) revert NoActiveProposal();
+        if (block.timestamp < proposal.executableAt) revert ProposalNotExecutable(proposal.executableAt);
+
+        driftThresholdBps = proposal.driftThresholdBps;
+        rebalanceSlippageBps = proposal.rebalanceSlippageBps;
+        delete _activeParameterProposal;
+        emit ParameterUpdateExecuted(proposal.id, proposal.driftThresholdBps, proposal.rebalanceSlippageBps);
+    }
+
+    // ---------------------------------------------------------------------
+    // Rebalancing
+    // ---------------------------------------------------------------------
+
+    /// @notice Max absolute deviation (in bps of NAV) of any basket asset from its target weight.
+    /// @dev The basket is rebalanceable when `maxDeviationBps` exceeds `driftThresholdBps`.
+    function measureDrift() public view returns (uint256 maxDeviationBps, bool aboveThreshold) {
+        uint256 nav = totalAssets();
+        uint256 n = _basketAssets.length;
+        if (nav == 0) return (0, false);
+        for (uint256 i = 0; i < n; ++i) {
+            address a = _basketAssets[i];
+            uint256 value = _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
+            uint256 dev = value > target ? value - target : target - value;
+            uint256 devBps = dev.mulDiv(BPS_DENOMINATOR, nav);
+            if (devBps > maxDeviationBps) maxDeviationBps = devBps;
+        }
+        aboveThreshold = maxDeviationBps > driftThresholdBps;
+    }
+
+    /// @notice Permissionless basket rebalance: sells overweight assets and buys underweight ones
+    /// through the registered liquidity routes, back toward the target weights.
+    /// @dev Reverts unless the basket drift exceeds `driftThresholdBps` (so the reimbursement
+    /// cannot be farmed), prices are fresh, the deadline has not passed, and every explicit
+    /// `minAmountsOut` is at least as strict as the vault collective-slippage default. The executor
+    /// receives a gas reimbursement measured on-chain and capped in USDC. DEX costs stay in the
+    /// vault; the history event exposes the net result and the weights before/after.
+    function rebalance(RebalanceParams calldata params) external nonReentrant returns (uint256) {
+        if (paused()) revert VaultPaused();
+        (uint256 maxDeviationBps, bool aboveThreshold) = measureDrift();
+        if (!aboveThreshold) revert DriftBelowThreshold(maxDeviationBps, driftThresholdBps);
+        if (params.deadline < block.timestamp) revert DeadlineExpired(block.timestamp);
+
+        uint256 n = _basketAssets.length;
+        if (params.minAmountsOut.length != 0 && params.minAmountsOut.length != n) {
+            revert MinOutsLengthMismatch(n, params.minAmountsOut.length);
+        }
+
+        uint256 startGas = gasleft();
+        uint256 nav = totalAssets();
+        uint256[] memory weightsBefore = _weightsBpsOf(nav);
+
+        uint256 soldValueUsdc = _sellOverweight(nav, params.minAmountsOut);
+
+        // Gas reimbursement: measured from the gas actually consumed, converted at a
+        // protocol-fixed ETH price cap and bounded by an absolute USDC cap, so an executor can
+        // neither inflate it nor receive anything without a valid rebalance.
+        uint256 gasRebate = _gasRebate(startGas);
+        IERC20 settlement = IERC20(asset());
+        uint256 pool = settlement.balanceOf(address(this));
+        if (gasRebate > pool) gasRebate = pool;
+        if (gasRebate > 0) settlement.safeTransfer(_msgSender(), gasRebate);
+
+        uint256 boughtValueUsdc = _buyUnderweight(nav, params.minAmountsOut);
+        uint256[] memory weightsAfter = _weightsBpsOf(totalAssets());
+
+        emit Rebalanced(_msgSender(), gasRebate, soldValueUsdc, boughtValueUsdc, weightsBefore, weightsAfter);
+        return gasRebate;
     }
 
     // ---------------------------------------------------------------------
@@ -764,6 +943,108 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
         _basketAssets = newAssets;
         _basketWeightsBps = newWeightsBps;
+    }
+
+    // ---------------------------------------------------------------------
+    // Rebalancing internals
+    // ---------------------------------------------------------------------
+
+    function _validateRebalanceParams(uint16 driftBps, uint16 slippageBps) internal view {
+        if (driftBps < MIN_DRIFT_BPS || driftBps > MAX_DRIFT_BPS) revert InvalidDriftThreshold(driftBps);
+        if (
+            slippageBps < MIN_REBALANCE_SLIPPAGE_BPS || slippageBps > MAX_REBALANCE_SLIPPAGE_BPS
+                || slippageBps > maxSlippageBps
+        ) revert InvalidRebalanceSlippage(slippageBps);
+    }
+
+    function _weightsBpsOf(uint256 nav) internal view returns (uint256[] memory weightsBps) {
+        uint256 n = _basketAssets.length;
+        weightsBps = new uint256[](n);
+        if (nav == 0) return weightsBps;
+        for (uint256 i = 0; i < n; ++i) {
+            address a = _basketAssets[i];
+            weightsBps[i] = _valueUsdc(a, IERC20(a).balanceOf(address(this))).mulDiv(BPS_DENOMINATOR, nav);
+        }
+    }
+
+    /// @dev Sells each overweight asset down to its target weight; returns the USDC actually
+    /// received. Reverts if an explicit min out is more permissive than the vault default.
+    function _sellOverweight(uint256 nav, uint256[] calldata minAmountsOut)
+        internal
+        returns (uint256 soldValueUsdc)
+    {
+        uint256 n = _basketAssets.length;
+        bool explicitMins = minAmountsOut.length != 0;
+        for (uint256 i = 0; i < n; ++i) {
+            address a = _basketAssets[i];
+            uint256 value = _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
+            if (value <= target) continue;
+            uint256 tokensToSell = _buyQuote(a, value - target);
+            if (tokensToSell == 0) continue;
+            uint256 defaultMin = _rebalanceSellMinOut(a, tokensToSell);
+            uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
+            if (minOut < defaultMin) revert RebalanceMinTooPermissive(i, minOut, defaultMin);
+            soldValueUsdc += _sell(a, tokensToSell, minOut);
+        }
+    }
+
+    /// @dev Buys each underweight asset back toward its target weight, distributing the vault's
+    /// available USDC proportionally to the deficits. Reverts if an explicit min out is more
+    /// permissive than the vault default.
+    function _buyUnderweight(uint256 nav, uint256[] calldata minAmountsOut)
+        internal
+        returns (uint256 boughtValueUsdc)
+    {
+        uint256 n = _basketAssets.length;
+        IERC20 settlement = IERC20(asset());
+        uint256 pool = settlement.balanceOf(address(this));
+        if (pool == 0) return 0;
+
+        uint256 totalDeficit;
+        uint256[] memory deficits = new uint256[](n);
+        for (uint256 i = 0; i < n; ++i) {
+            address a = _basketAssets[i];
+            uint256 value = _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
+            if (value < target) {
+                deficits[i] = target - value;
+                totalDeficit += deficits[i];
+            }
+        }
+        if (totalDeficit == 0) return 0;
+
+        bool explicitMins = minAmountsOut.length != 0;
+        for (uint256 i = 0; i < n; ++i) {
+            uint256 deficit = deficits[i];
+            if (deficit == 0) continue;
+            address a = _basketAssets[i];
+            uint256 alloc = pool.mulDiv(deficit, totalDeficit);
+            if (alloc == 0) continue;
+            uint256 defaultMin = _rebalanceBuyMinOut(a, alloc);
+            uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
+            if (minOut < defaultMin) revert RebalanceMinTooPermissive(i, minOut, defaultMin);
+            ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(asset(), a, alloc, minOut);
+            boughtValueUsdc += alloc;
+        }
+    }
+
+    /// @dev Measured gas reimbursement in USDC wei: actual gas used times the transaction gas price,
+    /// converted at the fixed ETH price cap and clamped to `MAX_GAS_REBATE_USDC`.
+    function _gasRebate(uint256 startGas) internal view returns (uint256) {
+        uint256 gasUsed = startGas - gasleft();
+        uint256 rebateUsdc = gasUsed * tx.gasprice * ETH_USDC_PRICE_CAP / 1e18;
+        return rebateUsdc > MAX_GAS_REBATE_USDC ? MAX_GAS_REBATE_USDC : rebateUsdc;
+    }
+
+    /// @dev USDC quote for a token sell, discounted by the collective rebalance slippage bound.
+    function _rebalanceSellMinOut(address a, uint256 tokenAmount) internal view returns (uint256) {
+        return _valueUsdc(a, tokenAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
+    }
+
+    /// @dev Token quote for a USDC buy, discounted by the collective rebalance slippage bound.
+    function _rebalanceBuyMinOut(address a, uint256 usdcAmount) internal view returns (uint256) {
+        return _buyQuote(a, usdcAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
     }
 
     // ---------------------------------------------------------------------

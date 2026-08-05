@@ -3,7 +3,9 @@ pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+import {AssetRegistry} from "../../src/AssetRegistry.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 import {ISwapRouter} from "../../src/interfaces/ISwapRouter.sol";
 
@@ -88,5 +90,51 @@ contract MockPool is ISwapRouter {
         require(inOk && outOk, "MockPool: swap transfer failed");
         reserveOf[assetIn] = rIn + amountIn;
         reserveOf[assetOut] = rOut - amountOut;
+    }
+}
+
+/// @dev ISwapRouter that swaps at the current registered oracle price (with a configurable fee),
+/// so tests can move prices without re-seeding reserves. Assumes the settlement asset is USDC
+/// (6 decimals). Tests fund the route directly via public mints.
+contract MockOracleRoute is ISwapRouter {
+    using Math for uint256;
+
+    AssetRegistry public immutable registry;
+    IERC20 public immutable usdc;
+    uint16 public immutable feeBps;
+
+    constructor(AssetRegistry registry_, IERC20 usdc_, uint16 feeBps_) {
+        registry = registry_;
+        usdc = usdc_;
+        feeBps = feeBps_;
+    }
+
+    function swapExactIn(address assetIn, address assetOut, uint256 amountIn, uint256 minAmountOut)
+        external
+        returns (uint256 amountOut)
+    {
+        require(assetIn == address(usdc) || assetOut == address(usdc), "MockOracleRoute: wrong pair");
+        address token = assetIn == address(usdc) ? assetOut : assetIn;
+        (uint256 priceE18,) = registry.getPrice(token, address(usdc));
+        uint256 tokenScale = 10 ** uint256(registry.assetConfig(token).decimals);
+
+        // USDC wei per whole token = priceE18 * 1e6 / 1e18; token quote for USDC uses the inverse.
+        if (assetIn == address(usdc)) {
+            amountOut = amountIn.mulDiv(tokenScale * 1e18, priceE18 * 1e6);
+        } else {
+            amountOut = amountIn.mulDiv(priceE18 * 1e6, tokenScale * 1e18);
+        }
+        amountOut = amountOut * (10_000 - feeBps) / 10_000;
+        if (amountOut < minAmountOut) revert SlippageExceeded(minAmountOut, amountOut);
+
+        bool inOk = IERC20(assetIn).transferFrom(msg.sender, address(this), amountIn);
+        bool outOk = IERC20(assetOut).transfer(msg.sender, amountOut);
+        require(inOk && outOk, "MockOracleRoute: swap transfer failed");
+        return amountOut;
+    }
+
+    /// @dev Test utility: pull liquidity out of the route to simulate a dry/dead DEX route.
+    function drain(address token, address to, uint256 amount) external {
+        IERC20(token).transfer(to, amount);
     }
 }
