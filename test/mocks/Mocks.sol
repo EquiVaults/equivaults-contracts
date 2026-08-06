@@ -3,6 +3,7 @@ pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {AssetRegistry} from "../../src/AssetRegistry.sol";
@@ -94,35 +95,38 @@ contract MockPool is ISwapRouter {
 }
 
 /// @dev ISwapRouter that swaps at the current registered oracle price (with a configurable fee),
-/// so tests can move prices without re-seeding reserves. Assumes the settlement asset is USDC
-/// (6 decimals). Tests fund the route directly via public mints.
+/// so tests can move prices without re-seeding reserves. The settlement asset decimals are read
+/// dynamically, so any stablecoin works (USDG, USDC, ...). Tests fund the route directly via
+/// public mints (or the deal cheatcode).
 contract MockOracleRoute is ISwapRouter {
     using Math for uint256;
 
     AssetRegistry public immutable registry;
-    IERC20 public immutable usdc;
+    IERC20 public immutable settlement;
     uint16 public immutable feeBps;
+    uint256 private immutable _settlementScale;
 
-    constructor(AssetRegistry registry_, IERC20 usdc_, uint16 feeBps_) {
+    constructor(AssetRegistry registry_, IERC20 settlement_, uint16 feeBps_) {
         registry = registry_;
-        usdc = usdc_;
+        settlement = settlement_;
         feeBps = feeBps_;
+        _settlementScale = 10 ** uint256(IERC20Metadata(address(settlement_)).decimals());
     }
 
     function swapExactIn(address assetIn, address assetOut, uint256 amountIn, uint256 minAmountOut)
         external
         returns (uint256 amountOut)
     {
-        require(assetIn == address(usdc) || assetOut == address(usdc), "MockOracleRoute: wrong pair");
-        address token = assetIn == address(usdc) ? assetOut : assetIn;
-        (uint256 priceE18,) = registry.getPrice(token, address(usdc));
+        require(assetIn == address(settlement) || assetOut == address(settlement), "MockOracleRoute: wrong pair");
+        address token = assetIn == address(settlement) ? assetOut : assetIn;
+        (uint256 priceE18,) = registry.getPrice(token, address(settlement));
         uint256 tokenScale = 10 ** uint256(registry.assetConfig(token).decimals);
 
-        // USDC wei per whole token = priceE18 * 1e6 / 1e18; token quote for USDC uses the inverse.
-        if (assetIn == address(usdc)) {
-            amountOut = amountIn.mulDiv(tokenScale * 1e18, priceE18 * 1e6);
+        // Settlement wei per whole token = priceE18 * settlementScale / 1e18; token quote uses the inverse.
+        if (assetIn == address(settlement)) {
+            amountOut = amountIn.mulDiv(tokenScale * 1e18, priceE18 * _settlementScale);
         } else {
-            amountOut = amountIn.mulDiv(priceE18 * 1e6, tokenScale * 1e18);
+            amountOut = amountIn.mulDiv(priceE18 * _settlementScale, tokenScale * 1e18);
         }
         amountOut = amountOut * (10_000 - feeBps) / 10_000;
         if (amountOut < minAmountOut) revert SlippageExceeded(minAmountOut, amountOut);

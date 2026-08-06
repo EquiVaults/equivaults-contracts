@@ -296,7 +296,7 @@ contract RebalanceEngineTest is Test {
         uint256 keeperAfter = usdc.balanceOf(keeper);
 
         assertGt(rebate, 0, "rebate must be measured and paid");
-        assertLt(rebate, vault.MAX_GAS_REBATE_USDC(), "1 gwei on ~300k gas stays under the cap");
+        assertLt(rebate, vault.MAX_GAS_REBATE(), "1 gwei on ~300k gas stays under the cap");
         assertEq(keeperAfter - keeperBefore, rebate, "executor received the full rebate");
     }
 
@@ -305,7 +305,7 @@ contract RebalanceEngineTest is Test {
 
         vm.txGasPrice(1_000 gwei);
         uint256 rebate = _rebalance(vault, new uint256[](0));
-        assertEq(rebate, vault.MAX_GAS_REBATE_USDC(), "absurd gas price clamps to the cap");
+        assertEq(rebate, vault.MAX_GAS_REBATE(), "absurd gas price clamps to the cap");
     }
 
     function testRebalanceMinTooPermissiveReverts() public {

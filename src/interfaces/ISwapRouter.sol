@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 /// @notice Minimal exact-input swap interface used by vaults.
 /// @dev Each registered asset carries its own `liquidityRoute`; the vault uses that route for both
-/// buying (USDC -> asset) and selling (asset -> USDC) against the settlement asset.
+/// buying (settlement asset -> asset) and selling (asset -> settlement asset).
 interface ISwapRouter {
     error SlippageExceeded(uint256 minAmountOut, uint256 amountOut);
 

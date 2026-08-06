@@ -11,11 +11,11 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {AssetRegistry} from "./AssetRegistry.sol";
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
-/// @notice USDC-settled ERC-4626 vault holding a basket of registered assets, with a configurable
-/// trust mode and a reallocation proposal mechanism.
+/// @notice Stablecoin-settled ERC-4626 vault holding a basket of registered assets, with a
+/// configurable trust mode and a reallocation proposal mechanism.
 /// @dev Deposits buy the basket immediately through each asset's liquidity route; redemptions
 /// withdraw the exact proportional share of every asset and let the user pick, per asset, between
-/// receiving the token and selling it to USDC. Shares are non-transferable. A performance fee on
+/// receiving the token and selling it to the settlement asset. Shares are non-transferable. A performance fee on
 /// realized gain (0-20 %, immutable) is charged only at withdrawal, 90 % to the manager and 10 %
 /// to the protocol treasury. If both price sources of any basket asset fail, this vault pauses.
 /// The trust mode (instant, delayed 1-7 days, or immutable) is chosen at creation and frozen: it
@@ -46,8 +46,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     uint16 public constant MIN_REBALANCE_SLIPPAGE_BPS = 10; // 0.1 %
     uint16 public constant MAX_REBALANCE_SLIPPAGE_BPS = 300; // 3 %
     uint16 public constant DEFAULT_REBALANCE_SLIPPAGE_BPS = 100; // 1 %
-    uint256 public constant MAX_GAS_REBATE_USDC = 5e6; // absolute USDC cap per rebalance (5 USDC)
-    uint256 public constant ETH_USDC_PRICE_CAP = 5_000e6; // protocol-fixed ETH price cap, USDC wei per ETH
+    uint256 public constant MAX_GAS_REBATE = 5e6; // absolute settlement cap per rebalance (5 units)
+    uint256 public constant ETH_SETTLEMENT_PRICE_CAP = 5_000e6; // fixed ETH price cap in settlement wei per ETH
 
     /// @dev Trust mode chosen at creation and immutable afterwards.
     enum TimelockMode {
@@ -86,7 +86,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     TimelockMode public immutable timelockMode;
     uint256 public immutable timelockDelay;
     AssetRegistry public immutable registry;
-    uint8 private immutable _usdcDecimals;
+    uint8 private immutable _settlementDecimals;
 
     address[] private _basketAssets;
     uint16[] private _basketWeightsBps;
@@ -107,7 +107,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
     ParameterProposal internal _activeParameterProposal;
 
-    /// @notice Cumulative USDC contributed by each shareholder, minus the realized cost of redeemed shares.
+    /// @notice Cumulative settlement contributed by each shareholder, minus the realized cost of redeemed shares.
     /// @dev Average cost basis per share = costBasis[account] / balanceOf(account); shares are
     /// non-transferable so this mapping always matches the share balance it accounts for.
     mapping(address account => uint256 amount) public costBasis;
@@ -172,19 +172,19 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
     event ParameterUpdateExecuted(uint256 indexed id, uint16 driftThresholdBps, uint16 rebalanceSlippageBps);
 
-    /// @notice Emitted after a successful rebalance: net USDC sold/bought, gas reimbursed to the
-    /// executor and the basket weights before/after (bps of NAV).
+    /// @notice Emitted after a successful rebalance: net settlement sold/bought, gas reimbursed to
+    /// the executor and the basket weights before/after (bps of NAV).
     event Rebalanced(
         address indexed executor,
         uint256 gasRebate,
-        uint256 soldValueUsdc,
-        uint256 boughtValueUsdc,
+        uint256 soldValueSettlement,
+        uint256 boughtValueSettlement,
         uint256[] weightsBeforeBps,
         uint256[] weightsAfterBps
     );
 
     constructor(
-        IERC20 usdc,
+        IERC20 settlementAsset,
         AssetRegistry registry_,
         address manager_,
         address[] memory assets,
@@ -194,7 +194,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         TimelockMode timelockMode_,
         uint256 timelockDelay_,
         uint256 capAum_
-    ) ERC4626(usdc) ERC20("EquiVault", "EQV") {
+    ) ERC4626(settlementAsset) ERC20("EquiVault", "EQV") {
         if (manager_ == address(0)) revert InvalidAddress();
         if (address(registry_) == address(0)) revert InvalidAddress();
         if (feeBps_ > MAX_FEE_BPS) revert InvalidFee(feeBps_);
@@ -209,7 +209,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             revert InvalidTimelockDelay(timelockDelay_);
         }
 
-        _initBasket(usdc, registry_, assets, weightsBps);
+        _initBasket(settlementAsset, registry_, assets, weightsBps);
 
         manager = manager_;
         registry = registry_;
@@ -219,10 +219,11 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         timelockDelay = timelockDelay_;
 
         // Settlement asset decimals drive the NAV scale: `priceE18` follows the USD/Chainlink
-        // convention (dollars per whole token at 1e18), so USDC wei value needs rescaling. Must be
-        // set before `_maxVaultAumBound`, which converts the registry ceiling to these units.
-        (bool ok, uint8 usdcDecimals) = SafeERC20.tryGetDecimals(usdc);
-        _usdcDecimals = ok ? usdcDecimals : 18;
+        // convention (dollars per whole token at 1e18), so the settlement wei value needs
+        // rescaling. Must be set before `_maxVaultAumBound`, which converts the registry ceiling
+        // to these units.
+        (bool ok, uint8 settlementDecimals) = SafeERC20.tryGetDecimals(settlementAsset);
+        _settlementDecimals = ok ? settlementDecimals : 18;
 
         // AUM cap in settlement-asset units, bounded by the registry-derived exposure ceiling.
         uint256 aumBound = _maxVaultAumBound(assets, weightsBps);
@@ -241,16 +242,17 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     // ERC-4626 overrides
     // ---------------------------------------------------------------------
 
-    /// @notice NAV of the vault expressed in USDC: each basket asset valued at its live registry
-    /// price (primary oracle, then fallback). The settlement balance is deliberately excluded:
-    /// exits distribute only the basket, so counting uninvested USDC would break the link between
+    /// @notice NAV of the vault expressed in settlement units: each basket asset valued at its live
+    /// registry price (primary oracle, then fallback). The settlement balance is deliberately
+    /// excluded: exits distribute only the basket, so counting uninvested settlement would break
+    /// the link between
     /// share price and redemption value (e.g. under a donation attack).
     function totalAssets() public view override returns (uint256) {
         uint256 nav;
         uint256 n = _basketAssets.length;
         for (uint256 i = 0; i < n; ++i) {
             address a = _basketAssets[i];
-            nav += _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            nav += _valueSettlement(a, IERC20(a).balanceOf(address(this)));
         }
         return nav;
     }
@@ -342,7 +344,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         _exit(_msgSender(), receiver, owner, shares, new bool[](0));
     }
 
-    /// @dev `sellTokens[i]` = true sells asset i to USDC, false transfers the token to `receiver`.
+    /// @dev `sellTokens[i]` = true sells asset i to the settlement asset, false transfers the
+    /// token to `receiver`.
     function withdraw(uint256 assets, address receiver, address owner, bool[] calldata sellTokens)
         external
         nonReentrant
@@ -362,7 +365,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         assets = _exit(_msgSender(), receiver, owner, shares, new bool[](0));
     }
 
-    /// @dev `sellTokens[i]` = true sells asset i to USDC, false transfers the token to `receiver`.
+    /// @dev `sellTokens[i]` = true sells asset i to the settlement asset, false transfers the
+    /// token to `receiver`.
     function redeem(uint256 shares, address receiver, address owner, bool[] calldata sellTokens)
         external
         nonReentrant
@@ -449,7 +453,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
     /// @dev Permissionless once `executableAt` is reached. Re-validates the target (asset statuses
     /// and registry caps may have changed since propose), then migrates the basket: removed assets
-    /// are sold to USDC and added assets are bought from the freed balance, each bounded by
+    /// are sold to the settlement asset and added assets are bought from the freed balance, each bounded by
     /// `sellMinOuts`/`buyMinOuts` in removed/added order (0 = vault default slippage bound).
     function executeReallocation(uint256[] calldata sellMinOuts, uint256[] calldata buyMinOuts)
         external
@@ -524,7 +528,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         if (nav == 0) return (0, false);
         for (uint256 i = 0; i < n; ++i) {
             address a = _basketAssets[i];
-            uint256 value = _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            uint256 value = _valueSettlement(a, IERC20(a).balanceOf(address(this)));
             uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
             uint256 dev = value > target ? value - target : target - value;
             uint256 devBps = dev.mulDiv(BPS_DENOMINATOR, nav);
@@ -538,8 +542,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     /// @dev Reverts unless the basket drift exceeds `driftThresholdBps` (so the reimbursement
     /// cannot be farmed), prices are fresh, the deadline has not passed, and every explicit
     /// `minAmountsOut` is at least as strict as the vault collective-slippage default. The executor
-    /// receives a gas reimbursement measured on-chain and capped in USDC. DEX costs stay in the
-    /// vault; the history event exposes the net result and the weights before/after.
+    /// receives a gas reimbursement measured on-chain and capped in the settlement asset. DEX costs
+    /// stay in the vault; the history event exposes the net result and the weights before/after.
     function rebalance(RebalanceParams calldata params) external nonReentrant returns (uint256) {
         if (paused()) revert VaultPaused();
         (uint256 maxDeviationBps, bool aboveThreshold) = measureDrift();
@@ -555,10 +559,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint256 nav = totalAssets();
         uint256[] memory weightsBefore = _weightsBpsOf(nav);
 
-        uint256 soldValueUsdc = _sellOverweight(nav, params.minAmountsOut);
+        uint256 soldValueSettlement = _sellOverweight(nav, params.minAmountsOut);
 
         // Gas reimbursement: measured from the gas actually consumed, converted at a
-        // protocol-fixed ETH price cap and bounded by an absolute USDC cap, so an executor can
+        // protocol-fixed ETH price cap and bounded by an absolute settlement cap, so an executor can
         // neither inflate it nor receive anything without a valid rebalance.
         uint256 gasRebate = _gasRebate(startGas);
         IERC20 settlement = IERC20(asset());
@@ -566,10 +570,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         if (gasRebate > pool) gasRebate = pool;
         if (gasRebate > 0) settlement.safeTransfer(_msgSender(), gasRebate);
 
-        uint256 boughtValueUsdc = _buyUnderweight(nav, params.minAmountsOut);
+        uint256 boughtValueSettlement = _buyUnderweight(nav, params.minAmountsOut);
         uint256[] memory weightsAfter = _weightsBpsOf(totalAssets());
 
-        emit Rebalanced(_msgSender(), gasRebate, soldValueUsdc, boughtValueUsdc, weightsBefore, weightsAfter);
+        emit Rebalanced(_msgSender(), gasRebate, soldValueSettlement, boughtValueSettlement, weightsBefore, weightsAfter);
         return gasRebate;
     }
 
@@ -593,7 +597,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     }
 
     /// @dev Sells the proportional share of every basket asset, charges the performance fee on
-    /// realized gain, then distributes per-asset token or USDC proceeds to `receiver`.
+    /// realized gain, then distributes per-asset token or settlement proceeds to `receiver`.
     function _exit(address caller, address receiver, address owner, uint256 shares, bool[] memory sellTokens)
         internal
         returns (uint256 assetsOut)
@@ -630,7 +634,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         return valueWithdrawn;
     }
 
-    /// @dev Fills `amounts` with the proportional share of each asset and returns its USDC value.
+    /// @dev Fills `amounts` with the proportional share of each asset and returns its settlement value.
     function _computeExitAmounts(uint256[] memory amounts, uint256 shares, uint256 totalShares)
         internal
         view
@@ -641,12 +645,12 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             address a = _basketAssets[i];
             uint256 amount = IERC20(a).balanceOf(address(this)).mulDiv(shares, totalShares);
             amounts[i] = amount;
-            valueWithdrawn += _valueUsdc(a, amount);
+            valueWithdrawn += _valueSettlement(a, amount);
         }
     }
 
     /// @dev Collects the fee by selling a proportional slice of every asset (even token exits),
-    /// then distributes the remainder per user choice. Returns the USDC fee pot collected.
+    /// then distributes the remainder per user choice. Returns the settlement fee pot collected.
     function _distribute(
         address receiver,
         uint256[] memory amounts,
@@ -666,8 +670,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
                 toSell = amounts[i] - feeSlice;
             }
             if (explicitFlags ? sellTokens[i] : true) {
-                uint256 usdcOut = _sell(a, toSell, _sellMinOut(a, toSell));
-                IERC20(asset()).safeTransfer(receiver, usdcOut);
+                uint256 settlementOut = _sell(a, toSell, _sellMinOut(a, toSell));
+                IERC20(asset()).safeTransfer(receiver, settlementOut);
             } else {
                 IERC20(a).safeTransfer(receiver, toSell);
             }
@@ -700,34 +704,34 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         }
     }
 
-    function _sell(address a, uint256 tokenAmount, uint256 minOut) internal returns (uint256 usdcOut) {
-        usdcOut = ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(a, asset(), tokenAmount, minOut);
+    function _sell(address a, uint256 tokenAmount, uint256 minOut) internal returns (uint256 settlementOut) {
+        settlementOut = ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(a, asset(), tokenAmount, minOut);
     }
 
-    /// @dev Token quote (natural units) for a USDC buy, discounted by the vault default slippage bound.
-    function _buyMinOut(address a, uint256 usdcAmount) internal view returns (uint256) {
-        uint256 quoted = _buyQuote(a, usdcAmount);
+    /// @dev Token quote (natural units) for a settlement buy, discounted by the vault default slippage bound.
+    function _buyMinOut(address a, uint256 settlementAmount) internal view returns (uint256) {
+        uint256 quoted = _buyQuote(a, settlementAmount);
         return quoted.mulDiv(BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR);
     }
 
-    /// @dev USDC quote for a token sell, discounted by the vault default slippage bound.
+    /// @dev Settlement quote for a token sell, discounted by the vault default slippage bound.
     function _sellMinOut(address a, uint256 tokenAmount) internal view returns (uint256) {
-        uint256 quoted = _valueUsdc(a, tokenAmount);
+        uint256 quoted = _valueSettlement(a, tokenAmount);
         return quoted.mulDiv(BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR);
     }
 
-    /// @dev USDC wei value of `amount` natural units of basket asset `a` at its live price.
-    /// `priceE18` is dollars per whole token (Chainlink-style), so the USDC quote rescales by
-    /// the settlement decimals and the base token's own decimals.
-    function _valueUsdc(address a, uint256 amount) internal view returns (uint256) {
+    /// @dev Settlement wei value of `amount` natural units of basket asset `a` at its live price.
+    /// `priceE18` is dollars per whole token (Chainlink-style), so the settlement quote rescales
+    /// by the settlement decimals and the base token's own decimals.
+    function _valueSettlement(address a, uint256 amount) internal view returns (uint256) {
         uint256 baseScale = 10 ** uint256(registry.assetConfig(a).decimals);
-        return amount.mulDiv(_priceOf(a) * (10 ** _usdcDecimals), baseScale * 1e18);
+        return amount.mulDiv(_priceOf(a) * (10 ** _settlementDecimals), baseScale * 1e18);
     }
 
-    /// @dev Natural-unit token quote for a USDC buy amount.
-    function _buyQuote(address a, uint256 usdcAmount) internal view returns (uint256) {
+    /// @dev Natural-unit token quote for a settlement buy amount.
+    function _buyQuote(address a, uint256 settlementAmount) internal view returns (uint256) {
         uint256 baseScale = 10 ** uint256(registry.assetConfig(a).decimals);
-        return usdcAmount.mulDiv(baseScale * 1e18, _priceOf(a) * (10 ** _usdcDecimals));
+        return settlementAmount.mulDiv(baseScale * 1e18, _priceOf(a) * (10 ** _settlementDecimals));
     }
 
     function _priceOf(address a) internal view returns (uint256) {
@@ -779,7 +783,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     /// @dev Validates the initial basket, approves each liquidity route for both legs and records
     /// the arrays. Extracted from the constructor to keep its stack depth within limits.
     function _initBasket(
-        IERC20 usdc_,
+        IERC20 settlement_,
         AssetRegistry registry_,
         address[] memory assets,
         uint16[] memory weightsBps
@@ -792,7 +796,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         for (uint256 i = 0; i < n; ++i) {
             address asset = assets[i];
             if (asset == address(0)) revert InvalidAddress();
-            if (asset == address(usdc_)) revert SettlementAssetInBasket(asset);
+            if (asset == address(settlement_)) revert SettlementAssetInBasket(asset);
             for (uint256 j = 0; j < i; ++j) {
                 if (assets[j] == asset) revert DuplicateAsset(asset);
             }
@@ -800,7 +804,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             try registry_.assetConfig(asset) returns (AssetRegistry.AssetConfig memory config) {
                 registered = true;
                 // Allow the registered liquidity route to pull settlement and basket tokens on swap.
-                SafeERC20.forceApprove(usdc_, config.liquidityRoute, type(uint256).max);
+                SafeERC20.forceApprove(settlement_, config.liquidityRoute, type(uint256).max);
                 SafeERC20.forceApprove(IERC20(asset), config.liquidityRoute, type(uint256).max);
             } catch {}
             if (!registered) revert AssetNotRegistered(asset);
@@ -857,14 +861,15 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint256 n = assets_.length;
         for (uint256 i = 0; i < n; ++i) {
             uint256 b = registry.maxVaultAum(assets_[i], weightsBps_[i]);
-            b = b.mulDiv(10 ** _usdcDecimals, 1e18);
+            b = b.mulDiv(10 ** _settlementDecimals, 1e18);
             if (b < bound) bound = b;
         }
         return bound;
     }
 
     /// @dev Migrates the held basket toward the proposal target: sells removed assets entirely to
-    /// USDC, buys added assets proportionally to their target weights from the freed balance, and
+    /// the settlement asset, buys added assets proportionally to their target weights from the
+    /// freed balance, and
     /// approves each new liquidity route. Kept assets keep their positions; weight drift is left to
     /// the rebalance engine (F002-S002).
     function _migrateBasket(
@@ -920,7 +925,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             revert MinOutsLengthMismatch(nAdded, buyMinOuts.length);
         }
 
-        // The buy leg needs the route to pull USDC, and later sells/withdrawals need the token leg.
+        // The buy leg needs the route to pull the settlement asset, and later sells/withdrawals
+        // need the token leg.
         for (uint256 i = 0; i < nAdded; ++i) {
             address a = added[i];
             address route = registry.assetConfig(a).liquidityRoute;
@@ -930,10 +936,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
         uint256 addedWeightSum;
         for (uint256 i = 0; i < nAdded; ++i) addedWeightSum += addedWeights[i];
-        uint256 usdcBalance = IERC20(asset()).balanceOf(address(this));
+        uint256 settlementBalance = IERC20(asset()).balanceOf(address(this));
         for (uint256 i = 0; i < nAdded; ++i) {
             address a = added[i];
-            uint256 alloc = usdcBalance.mulDiv(addedWeights[i], addedWeightSum);
+            uint256 alloc = settlementBalance.mulDiv(addedWeights[i], addedWeightSum);
             if (alloc == 0) continue;
             uint256 minOut = buyMinOuts.length != 0 ? buyMinOuts[i] : 0;
             ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(
@@ -963,21 +969,21 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         if (nav == 0) return weightsBps;
         for (uint256 i = 0; i < n; ++i) {
             address a = _basketAssets[i];
-            weightsBps[i] = _valueUsdc(a, IERC20(a).balanceOf(address(this))).mulDiv(BPS_DENOMINATOR, nav);
+            weightsBps[i] = _valueSettlement(a, IERC20(a).balanceOf(address(this))).mulDiv(BPS_DENOMINATOR, nav);
         }
     }
 
-    /// @dev Sells each overweight asset down to its target weight; returns the USDC actually
+    /// @dev Sells each overweight asset down to its target weight; returns the settlement actually
     /// received. Reverts if an explicit min out is more permissive than the vault default.
     function _sellOverweight(uint256 nav, uint256[] calldata minAmountsOut)
         internal
-        returns (uint256 soldValueUsdc)
+        returns (uint256 soldValueSettlement)
     {
         uint256 n = _basketAssets.length;
         bool explicitMins = minAmountsOut.length != 0;
         for (uint256 i = 0; i < n; ++i) {
             address a = _basketAssets[i];
-            uint256 value = _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            uint256 value = _valueSettlement(a, IERC20(a).balanceOf(address(this)));
             uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
             if (value <= target) continue;
             uint256 tokensToSell = _buyQuote(a, value - target);
@@ -985,16 +991,16 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             uint256 defaultMin = _rebalanceSellMinOut(a, tokensToSell);
             uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
             if (minOut < defaultMin) revert RebalanceMinTooPermissive(i, minOut, defaultMin);
-            soldValueUsdc += _sell(a, tokensToSell, minOut);
+            soldValueSettlement += _sell(a, tokensToSell, minOut);
         }
     }
 
     /// @dev Buys each underweight asset back toward its target weight, distributing the vault's
-    /// available USDC proportionally to the deficits. Reverts if an explicit min out is more
+    /// available settlement proportionally to the deficits. Reverts if an explicit min out is more
     /// permissive than the vault default.
     function _buyUnderweight(uint256 nav, uint256[] calldata minAmountsOut)
         internal
-        returns (uint256 boughtValueUsdc)
+        returns (uint256 boughtValueSettlement)
     {
         uint256 n = _basketAssets.length;
         IERC20 settlement = IERC20(asset());
@@ -1005,7 +1011,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint256[] memory deficits = new uint256[](n);
         for (uint256 i = 0; i < n; ++i) {
             address a = _basketAssets[i];
-            uint256 value = _valueUsdc(a, IERC20(a).balanceOf(address(this)));
+            uint256 value = _valueSettlement(a, IERC20(a).balanceOf(address(this)));
             uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
             if (value < target) {
                 deficits[i] = target - value;
@@ -1025,26 +1031,26 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
             if (minOut < defaultMin) revert RebalanceMinTooPermissive(i, minOut, defaultMin);
             ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(asset(), a, alloc, minOut);
-            boughtValueUsdc += alloc;
+            boughtValueSettlement += alloc;
         }
     }
 
-    /// @dev Measured gas reimbursement in USDC wei: actual gas used times the transaction gas price,
-    /// converted at the fixed ETH price cap and clamped to `MAX_GAS_REBATE_USDC`.
+    /// @dev Measured gas reimbursement in settlement wei: actual gas used times the transaction
+    /// gas price, converted at the fixed ETH price cap and clamped to `MAX_GAS_REBATE`.
     function _gasRebate(uint256 startGas) internal view returns (uint256) {
         uint256 gasUsed = startGas - gasleft();
-        uint256 rebateUsdc = gasUsed * tx.gasprice * ETH_USDC_PRICE_CAP / 1e18;
-        return rebateUsdc > MAX_GAS_REBATE_USDC ? MAX_GAS_REBATE_USDC : rebateUsdc;
+        uint256 rebateSettlement = gasUsed * tx.gasprice * ETH_SETTLEMENT_PRICE_CAP / 1e18;
+        return rebateSettlement > MAX_GAS_REBATE ? MAX_GAS_REBATE : rebateSettlement;
     }
 
-    /// @dev USDC quote for a token sell, discounted by the collective rebalance slippage bound.
+    /// @dev Settlement quote for a token sell, discounted by the collective rebalance slippage bound.
     function _rebalanceSellMinOut(address a, uint256 tokenAmount) internal view returns (uint256) {
-        return _valueUsdc(a, tokenAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
+        return _valueSettlement(a, tokenAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
     }
 
-    /// @dev Token quote for a USDC buy, discounted by the collective rebalance slippage bound.
-    function _rebalanceBuyMinOut(address a, uint256 usdcAmount) internal view returns (uint256) {
-        return _buyQuote(a, usdcAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
+    /// @dev Token quote for a settlement buy, discounted by the collective rebalance slippage bound.
+    function _rebalanceBuyMinOut(address a, uint256 settlementAmount) internal view returns (uint256) {
+        return _buyQuote(a, settlementAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
     }
 
     // ---------------------------------------------------------------------
