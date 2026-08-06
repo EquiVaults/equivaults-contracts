@@ -1,3 +1,8 @@
 [profile.default]
 solc_version = "0.8.30"
+# via-ir: the factory deploys vaults through a 12-argument constructor, which the legacy codegen
+# cannot fit on the stack (stack too deep); via-ir also optimizes the bytecode better for production.
+via_ir = true
+optimizer = true
+optimizer_runs = 200
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]

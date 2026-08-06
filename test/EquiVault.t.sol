@@ -86,7 +86,7 @@ contract EquiVaultTest is Test {
         registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), 1_000_000e18, MAX_PRICE_AGE);
         vm.stopPrank();
 
-        vault = new EquiVault(usdc, registry, manager, assets(), weights(), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        vault = new EquiVault(usdc, registry, manager, assets(), weights(), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
     }
 
     // ------------------------------------------------------------------
@@ -98,16 +98,16 @@ contract EquiVaultTest is Test {
         uint16[] memory w = weights();
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidFee.selector, uint16(2_001)));
-        new EquiVault(usdc, registry, manager, a, w, 2_001, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, a, w, 2_001, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(3_001)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 3_001, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 3_001, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAddress.selector));
-        new EquiVault(usdc, registry, address(0), a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, address(0), a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidBasketSize.selector, uint256(0)));
-        new EquiVault(usdc, registry, manager, new address[](0), new uint16[](0), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, new address[](0), new uint16[](0), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         address[] memory six = new address[](6);
         uint16[] memory sixW = new uint16[](6);
@@ -116,12 +116,12 @@ contract EquiVaultTest is Test {
             sixW[i] = uint16(1_000 + i * 1_000);
         }
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidBasketSize.selector, uint256(6)));
-        new EquiVault(usdc, registry, manager, six, sixW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, six, sixW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         address[] memory one = new address[](1);
         one[0] = address(tokenA);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.BasketLengthMismatch.selector, uint256(1), uint256(0)));
-        new EquiVault(usdc, registry, manager, one, new uint16[](0), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, one, new uint16[](0), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         // weight below the 5 % floor
         address[] memory two = new address[](2);
@@ -131,13 +131,13 @@ contract EquiVaultTest is Test {
         lowW[0] = 100;
         lowW[1] = 9_900;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidWeight.selector, uint16(100)));
-        new EquiVault(usdc, registry, manager, two, lowW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, two, lowW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         // weights not summing to 100 %
         uint16[] memory partialW = new uint16[](1);
         partialW[0] = 5_000;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.WeightsMustSumTo10000.selector, uint256(5_000)));
-        new EquiVault(usdc, registry, manager, one, partialW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, one, partialW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         // duplicate asset
         address[] memory dupAssets = new address[](2);
@@ -147,14 +147,14 @@ contract EquiVaultTest is Test {
         dupW[0] = 5_000;
         dupW[1] = 5_000;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.DuplicateAsset.selector, address(tokenA)));
-        new EquiVault(usdc, registry, manager, dupAssets, dupW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, dupAssets, dupW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         // settlement asset in basket
         address[] memory withUsdc = new address[](2);
         withUsdc[0] = address(usdc);
         withUsdc[1] = address(tokenA);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.SettlementAssetInBasket.selector, address(usdc)));
-        new EquiVault(usdc, registry, manager, withUsdc, dupW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, withUsdc, dupW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         // unregistered asset
         address[] memory unknown = new address[](1);
@@ -162,7 +162,7 @@ contract EquiVaultTest is Test {
         uint16[] memory fullW = new uint16[](1);
         fullW[0] = 10_000;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.AssetNotRegistered.selector, address(0xBEEF)));
-        new EquiVault(usdc, registry, manager, unknown, fullW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, unknown, fullW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
     }
 
     // ------------------------------------------------------------------
@@ -417,7 +417,7 @@ contract EquiVaultTest is Test {
         bOnly[0] = address(tokenB);
         uint16[] memory bW = new uint16[](1);
         bW[0] = 10_000;
-        EquiVault vault2 = new EquiVault(usdc, registry, manager, bOnly, bW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault2 = new EquiVault(usdc, registry, manager, bOnly, bW, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
 
         _fundAndApprove(alice, 1_000e6);
         _fundAndApprove(bob, 1_000e6);

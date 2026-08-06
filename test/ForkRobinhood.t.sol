@@ -84,7 +84,7 @@ contract ForkRobinhoodTest is Test {
         w[0] = 6_000;
         w[1] = 4_000;
         vault = new EquiVault(
-            MockToken(USDG), registry, manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6
+            MockToken(USDG), registry, manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0
         );
     }
 

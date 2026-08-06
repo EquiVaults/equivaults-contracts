@@ -79,7 +79,7 @@ contract RebalanceEngineTest is Test {
         uint16[] memory w = new uint16[](2);
         w[0] = 6_000;
         w[1] = 4_000;
-        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 300, mode, delay, 1_000_000e6);
+        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 300, mode, delay, 1_000_000e6, 0, 0);
     }
 
     /// @dev Alice deposits 1,000 USDC, then asset A appreciates 20 % so the basket drifts ~4.3
@@ -159,7 +159,7 @@ contract RebalanceEngineTest is Test {
         w[0] = 6_000;
         w[1] = 4_000;
         EquiVault strictVault =
-            new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+            new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
         vm.prank(manager);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidRebalanceSlippage.selector, uint16(150)));
         strictVault.proposeParameters(500, 150);

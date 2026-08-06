@@ -193,7 +193,9 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint16 maxSlippageBps_,
         TimelockMode timelockMode_,
         uint256 timelockDelay_,
-        uint256 capAum_
+        uint256 capAum_,
+        uint16 driftThresholdBps_,
+        uint16 rebalanceSlippageBps_
     ) ERC4626(settlementAsset) ERC20("EquiVault", "EQV") {
         if (manager_ == address(0)) revert InvalidAddress();
         if (address(registry_) == address(0)) revert InvalidAddress();
@@ -230,12 +232,24 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         if (capAum_ == 0 || capAum_ > aumBound) revert InvalidAumCap(capAum_, aumBound);
         capAum = capAum_;
 
-        // Rebalance parameters default to 3 drift points and 1 % collective slippage; both change
-        // only through a parameter update proposal executed via the vault timelock. The slippage
-        // default never exceeds the vault's own `maxSlippageBps` bound.
-        driftThresholdBps = DEFAULT_DRIFT_BPS;
-        rebalanceSlippageBps =
-            maxSlippageBps_ < DEFAULT_REBALANCE_SLIPPAGE_BPS ? maxSlippageBps_ : DEFAULT_REBALANCE_SLIPPAGE_BPS;
+        // Rebalance parameters: fixed at creation within their bounds (0 = protocol defaults, as
+        // before: 3 drift points and min(1 %, vault max slippage) collective slippage). Both later
+        // change only through a parameter update proposal executed via the vault timelock.
+        if (driftThresholdBps_ != 0) {
+            if (driftThresholdBps_ < MIN_DRIFT_BPS || driftThresholdBps_ > MAX_DRIFT_BPS) {
+                revert InvalidDriftThreshold(driftThresholdBps_);
+            }
+        }
+        if (rebalanceSlippageBps_ != 0) {
+            if (
+                rebalanceSlippageBps_ < MIN_REBALANCE_SLIPPAGE_BPS || rebalanceSlippageBps_ > MAX_REBALANCE_SLIPPAGE_BPS
+                    || rebalanceSlippageBps_ > maxSlippageBps_
+            ) revert InvalidRebalanceSlippage(rebalanceSlippageBps_);
+        }
+        driftThresholdBps = driftThresholdBps_ == 0 ? DEFAULT_DRIFT_BPS : driftThresholdBps_;
+        rebalanceSlippageBps = rebalanceSlippageBps_ == 0
+            ? (maxSlippageBps_ < DEFAULT_REBALANCE_SLIPPAGE_BPS ? maxSlippageBps_ : DEFAULT_REBALANCE_SLIPPAGE_BPS)
+            : rebalanceSlippageBps_;
     }
 
     // ---------------------------------------------------------------------

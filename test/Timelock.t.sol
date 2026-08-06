@@ -93,7 +93,7 @@ contract TimelockTest is Test {
     {
         address[] memory a = _assetsAB();
         uint16[] memory w = _weights(6_000, 4_000);
-        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 100, mode, delay, cap);
+        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 100, mode, delay, cap, 0, 0);
     }
 
     function _assetsAB() internal view returns (address[] memory) {
@@ -147,19 +147,19 @@ contract TimelockTest is Test {
         uint16[] memory w = _weights(6_000, 4_000);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(0)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 0, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 0, 1_000_000e6, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(8 days)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 8 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 8 days, 1_000_000e6, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(1 days)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 1 days, 1_000_000e6);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 1 days, 1_000_000e6, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, uint256(0), BOUND_AB));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 0);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 0, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, BOUND_AB + 1, BOUND_AB));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, BOUND_AB + 1);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, BOUND_AB + 1, 0, 0);
     }
 
     // ------------------------------------------------------------------
