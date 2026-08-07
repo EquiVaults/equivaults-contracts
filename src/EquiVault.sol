@@ -9,6 +9,10 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {AssetRegistry} from "./AssetRegistry.sol";
+import {ExitLib} from "./ExitLib.sol";
+import {InitLib} from "./InitLib.sol";
+import {MigrationLib} from "./MigrationLib.sol";
+import {RebalanceLib} from "./RebalanceLib.sol";
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
 /// @notice Stablecoin-settled ERC-4626 vault holding a basket of registered assets, with a
@@ -197,20 +201,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) ERC4626(settlementAsset) ERC20("EquiVault", "EQV") {
-        if (manager_ == address(0)) revert InvalidAddress();
-        if (address(registry_) == address(0)) revert InvalidAddress();
-        if (feeBps_ > MAX_FEE_BPS) revert InvalidFee(feeBps_);
-        if (maxSlippageBps_ > MAX_SLIPPAGE_BPS) revert InvalidSlippage(maxSlippageBps_);
         // `timelockMode_` cannot be out of range: Solidity bounds-checks enum values on conversion
         // and on ABI decoding, so an invalid mode is rejected with Panic(0x21) before this code.
-        if (timelockMode_ == TimelockMode.Delayed) {
-            if (timelockDelay_ < MIN_TIMELOCK_DELAY || timelockDelay_ > MAX_TIMELOCK_DELAY) {
-                revert InvalidTimelockDelay(timelockDelay_);
-            }
-        } else if (timelockDelay_ != 0) {
-            revert InvalidTimelockDelay(timelockDelay_);
-        }
-
         _initBasket(settlementAsset, registry_, assets, weightsBps);
 
         manager = manager_;
@@ -229,27 +221,17 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
         // AUM cap in settlement-asset units, bounded by the registry-derived exposure ceiling.
         uint256 aumBound = _maxVaultAumBound(assets, weightsBps);
-        if (capAum_ == 0 || capAum_ > aumBound) revert InvalidAumCap(capAum_, aumBound);
-        capAum = capAum_;
 
-        // Rebalance parameters: fixed at creation within their bounds (0 = protocol defaults, as
-        // before: 3 drift points and min(1 %, vault max slippage) collective slippage). Both later
-        // change only through a parameter update proposal executed via the vault timelock.
-        if (driftThresholdBps_ != 0) {
-            if (driftThresholdBps_ < MIN_DRIFT_BPS || driftThresholdBps_ > MAX_DRIFT_BPS) {
-                revert InvalidDriftThreshold(driftThresholdBps_);
-            }
-        }
-        if (rebalanceSlippageBps_ != 0) {
-            if (
-                rebalanceSlippageBps_ < MIN_REBALANCE_SLIPPAGE_BPS || rebalanceSlippageBps_ > MAX_REBALANCE_SLIPPAGE_BPS
-                    || rebalanceSlippageBps_ > maxSlippageBps_
-            ) revert InvalidRebalanceSlippage(rebalanceSlippageBps_);
-        }
-        driftThresholdBps = driftThresholdBps_ == 0 ? DEFAULT_DRIFT_BPS : driftThresholdBps_;
-        rebalanceSlippageBps = rebalanceSlippageBps_ == 0
-            ? (maxSlippageBps_ < DEFAULT_REBALANCE_SLIPPAGE_BPS ? maxSlippageBps_ : DEFAULT_REBALANCE_SLIPPAGE_BPS)
-            : rebalanceSlippageBps_;
+        // Remaining creation bounds are validated in InitLib (kept out of this initcode, which
+        // VaultFactory embeds, so the factory stays under the EIP-170 code-size limit). 0 means
+        // protocol defaults for drift and rebalance slippage.
+        (uint16 drift, uint16 rebalanceSlip) = InitLib.validate(
+            manager_, registry_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_, capAum_, aumBound,
+            driftThresholdBps_, rebalanceSlippageBps_
+        );
+        capAum = capAum_;
+        driftThresholdBps = drift;
+        rebalanceSlippageBps = rebalanceSlip;
     }
 
     // ---------------------------------------------------------------------
@@ -406,6 +388,12 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         return _basketAssets;
     }
 
+    /// @notice Settlement asset decimals (read at construction, 18 when unreadable), exposed for
+    /// `RebalanceLib` to rescale Chainlink-style prices into settlement units.
+    function settlementDecimals() external view returns (uint8) {
+        return _settlementDecimals;
+    }
+
     function basketWeightsBps() external view returns (uint16[] memory) {
         return _basketWeightsBps;
     }
@@ -535,20 +523,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     /// @notice Max absolute deviation (in bps of NAV) of any basket asset from its target weight.
-    /// @dev The basket is rebalanceable when `maxDeviationBps` exceeds `driftThresholdBps`.
+    /// @dev The basket is rebalanceable when `maxDeviationBps` exceeds `driftThresholdBps`. The
+    /// computation runs in `RebalanceLib` to keep this runtime under the EIP-170 code-size limit.
     function measureDrift() public view returns (uint256 maxDeviationBps, bool aboveThreshold) {
-        uint256 nav = totalAssets();
-        uint256 n = _basketAssets.length;
-        if (nav == 0) return (0, false);
-        for (uint256 i = 0; i < n; ++i) {
-            address a = _basketAssets[i];
-            uint256 value = _valueSettlement(a, IERC20(a).balanceOf(address(this)));
-            uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
-            uint256 dev = value > target ? value - target : target - value;
-            uint256 devBps = dev.mulDiv(BPS_DENOMINATOR, nav);
-            if (devBps > maxDeviationBps) maxDeviationBps = devBps;
-        }
-        aboveThreshold = maxDeviationBps > driftThresholdBps;
+        return RebalanceLib.measureDrift(this);
     }
 
     /// @notice Permissionless basket rebalance: sells overweight assets and buys underweight ones
@@ -558,6 +536,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     /// `minAmountsOut` is at least as strict as the vault collective-slippage default. The executor
     /// receives a gas reimbursement measured on-chain and capped in the settlement asset. DEX costs
     /// stay in the vault; the history event exposes the net result and the weights before/after.
+    /// The heavy sell/buy logic runs in `RebalanceLib` (DELEGATECALL, so the vault's context and
+    /// route allowances apply) to keep this runtime under the EIP-170 code-size limit.
     function rebalance(RebalanceParams calldata params) external nonReentrant returns (uint256) {
         if (paused()) revert VaultPaused();
         (uint256 maxDeviationBps, bool aboveThreshold) = measureDrift();
@@ -571,21 +551,23 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
         uint256 startGas = gasleft();
         uint256 nav = totalAssets();
-        uint256[] memory weightsBefore = _weightsBpsOf(nav);
+        uint256[] memory weightsBefore = RebalanceLib.weightsBpsOf(this, nav);
 
-        uint256 soldValueSettlement = _sellOverweight(nav, params.minAmountsOut);
+        uint256 soldValueSettlement = RebalanceLib.sellOverweight(this, nav, params.minAmountsOut);
 
-        // Gas reimbursement: measured from the gas actually consumed, converted at a
-        // protocol-fixed ETH price cap and bounded by an absolute settlement cap, so an executor can
-        // neither inflate it nor receive anything without a valid rebalance.
-        uint256 gasRebate = _gasRebate(startGas);
+        // Gas reimbursement: measured here in the vault (reading `gasleft()` inside the library
+        // would be amputated by the EIP-150 63/64 rule and overestimate the gas used), converted at
+        // a protocol-fixed ETH price cap and bounded by an absolute settlement cap, so an executor
+        // can neither inflate it nor receive anything without a valid rebalance. Paid between the
+        // sell and buy legs so the pool holds the settlement just received from sells.
+        uint256 gasRebate = RebalanceLib.computeRebate(startGas - gasleft());
         IERC20 settlement = IERC20(asset());
         uint256 pool = settlement.balanceOf(address(this));
         if (gasRebate > pool) gasRebate = pool;
         if (gasRebate > 0) settlement.safeTransfer(_msgSender(), gasRebate);
 
-        uint256 boughtValueSettlement = _buyUnderweight(nav, params.minAmountsOut);
-        uint256[] memory weightsAfter = _weightsBpsOf(totalAssets());
+        uint256 boughtValueSettlement = RebalanceLib.buyUnderweight(this, nav, params.minAmountsOut);
+        uint256[] memory weightsAfter = RebalanceLib.weightsBpsOf(this, totalAssets());
 
         emit Rebalanced(_msgSender(), gasRebate, soldValueSettlement, boughtValueSettlement, weightsBefore, weightsAfter);
         return gasRebate;
@@ -628,9 +610,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         if (sellTokens.length != 0 && sellTokens.length != n) revert SellFlagsLengthMismatch(n, sellTokens.length);
         bool explicitFlags = sellTokens.length != 0;
 
-        // Exact proportional share of each asset, valued at live prices.
-        uint256[] memory amounts = new uint256[](n);
-        uint256 valueWithdrawn = _computeExitAmounts(amounts, shares, totalShares);
+        // Exact proportional share of each asset, valued at live prices. The per-asset amounts and
+        // the distribution (swaps and transfers) run in ExitLib to keep this runtime under the
+        // EIP-170 code-size limit; the vault keeps the storage writes (cost basis, share burn).
+        (uint256[] memory amounts, uint256 valueWithdrawn) = ExitLib.computeExitAmounts(this, shares, totalShares);
 
         // Realized gain on the withdrawn fraction; fee only on positive gain.
         uint256 realizedCost = costBasis[owner].mulDiv(shares, sharesBefore);
@@ -642,54 +625,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
         _burn(owner, shares);
 
-        _settleFee(_distribute(receiver, amounts, sellTokens, explicitFlags, fee, valueWithdrawn));
+        _settleFee(ExitLib.distribute(this, receiver, amounts, sellTokens, explicitFlags, fee, valueWithdrawn));
 
         emit Withdraw(caller, receiver, owner, valueWithdrawn, shares);
         return valueWithdrawn;
-    }
-
-    /// @dev Fills `amounts` with the proportional share of each asset and returns its settlement value.
-    function _computeExitAmounts(uint256[] memory amounts, uint256 shares, uint256 totalShares)
-        internal
-        view
-        returns (uint256 valueWithdrawn)
-    {
-        uint256 n = _basketAssets.length;
-        for (uint256 i = 0; i < n; ++i) {
-            address a = _basketAssets[i];
-            uint256 amount = IERC20(a).balanceOf(address(this)).mulDiv(shares, totalShares);
-            amounts[i] = amount;
-            valueWithdrawn += _valueSettlement(a, amount);
-        }
-    }
-
-    /// @dev Collects the fee by selling a proportional slice of every asset (even token exits),
-    /// then distributes the remainder per user choice. Returns the settlement fee pot collected.
-    function _distribute(
-        address receiver,
-        uint256[] memory amounts,
-        bool[] memory sellTokens,
-        bool explicitFlags,
-        uint256 fee,
-        uint256 valueWithdrawn
-    ) internal returns (uint256 feePot) {
-        uint256 n = _basketAssets.length;
-        for (uint256 i = 0; i < n; ++i) {
-            address a = _basketAssets[i];
-            uint256 toSell = amounts[i];
-            if (fee > 0) {
-                uint256 feeSlice = amounts[i].mulDiv(fee, valueWithdrawn, Math.Rounding.Ceil);
-                if (feeSlice > amounts[i]) feeSlice = amounts[i];
-                feePot += _sell(a, feeSlice, _sellMinOut(a, feeSlice));
-                toSell = amounts[i] - feeSlice;
-            }
-            if (explicitFlags ? sellTokens[i] : true) {
-                uint256 settlementOut = _sell(a, toSell, _sellMinOut(a, toSell));
-                IERC20(asset()).safeTransfer(receiver, settlementOut);
-            } else {
-                IERC20(a).safeTransfer(receiver, toSell);
-            }
-        }
     }
 
     /// @dev Splits the collected fee pot 90 % (manager) / 10 % (treasury) and transfers it.
@@ -718,34 +657,26 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         }
     }
 
-    function _sell(address a, uint256 tokenAmount, uint256 minOut) internal returns (uint256 settlementOut) {
-        settlementOut = ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(a, asset(), tokenAmount, minOut);
-    }
-
     /// @dev Token quote (natural units) for a settlement buy, discounted by the vault default slippage bound.
     function _buyMinOut(address a, uint256 settlementAmount) internal view returns (uint256) {
         uint256 quoted = _buyQuote(a, settlementAmount);
         return quoted.mulDiv(BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR);
     }
 
-    /// @dev Settlement quote for a token sell, discounted by the vault default slippage bound.
-    function _sellMinOut(address a, uint256 tokenAmount) internal view returns (uint256) {
-        uint256 quoted = _valueSettlement(a, tokenAmount);
-        return quoted.mulDiv(BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR);
-    }
-
-    /// @dev Settlement wei value of `amount` natural units of basket asset `a` at its live price.
-    /// `priceE18` is dollars per whole token (Chainlink-style), so the settlement quote rescales
-    /// by the settlement decimals and the base token's own decimals.
-    function _valueSettlement(address a, uint256 amount) internal view returns (uint256) {
-        uint256 baseScale = 10 ** uint256(registry.assetConfig(a).decimals);
-        return amount.mulDiv(_priceOf(a) * (10 ** _settlementDecimals), baseScale * 1e18);
-    }
-
     /// @dev Natural-unit token quote for a settlement buy amount.
     function _buyQuote(address a, uint256 settlementAmount) internal view returns (uint256) {
         uint256 baseScale = 10 ** uint256(registry.assetConfig(a).decimals);
         return settlementAmount.mulDiv(baseScale * 1e18, _priceOf(a) * (10 ** _settlementDecimals));
+    }
+
+    /// @dev Settlement wei value of `amount` natural units of basket asset `a` at its live price.
+    /// `priceE18` is dollars per whole token (Chainlink-style), so the settlement quote rescales
+    /// by the settlement decimals and the base token's own decimals. Kept here because `totalAssets`
+    /// (the ERC-4626 NAV) is called on every valuation; the exit/rebalance copies live in the
+    /// ExitLib/RebalanceLib/MigrationLib libraries to keep this runtime under EIP-170.
+    function _valueSettlement(address a, uint256 amount) internal view returns (uint256) {
+        uint256 baseScale = 10 ** uint256(registry.assetConfig(a).decimals);
+        return amount.mulDiv(_priceOf(a) * (10 ** _settlementDecimals), baseScale * 1e18);
     }
 
     function _priceOf(address a) internal view returns (uint256) {
@@ -883,84 +814,17 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
     /// @dev Migrates the held basket toward the proposal target: sells removed assets entirely to
     /// the settlement asset, buys added assets proportionally to their target weights from the
-    /// freed balance, and
-    /// approves each new liquidity route. Kept assets keep their positions; weight drift is left to
-    /// the rebalance engine (F002-S002).
+    /// freed balance, and approves each new liquidity route. Kept assets keep their positions;
+    /// weight drift is left to the rebalance engine. The swap/approval work runs in `MigrationLib`
+    /// (DELEGATECALL, so the vault's context and route allowances apply) to keep this runtime under
+    /// the EIP-170 code-size limit; only the basket arrays are written here.
     function _migrateBasket(
         address[] memory newAssets,
         uint16[] memory newWeightsBps,
         uint256[] calldata sellMinOuts,
         uint256[] calldata buyMinOuts
     ) internal {
-        // Removed assets, in current basket order.
-        address[] memory removed = new address[](_basketAssets.length);
-        uint256 nRemoved;
-        for (uint256 i = 0; i < _basketAssets.length; ++i) {
-            bool keep;
-            for (uint256 j = 0; j < newAssets.length; ++j) {
-                if (_basketAssets[i] == newAssets[j]) {
-                    keep = true;
-                    break;
-                }
-            }
-            if (!keep) removed[nRemoved++] = _basketAssets[i];
-        }
-        if (sellMinOuts.length != 0 && sellMinOuts.length != nRemoved) {
-            revert MinOutsLengthMismatch(nRemoved, sellMinOuts.length);
-        }
-
-        for (uint256 i = 0; i < nRemoved; ++i) {
-            address a = removed[i];
-            uint256 balance = IERC20(a).balanceOf(address(this));
-            if (balance == 0) continue;
-            uint256 minOut = sellMinOuts.length != 0 ? sellMinOuts[i] : 0;
-            _sell(a, balance, minOut == 0 ? _sellMinOut(a, balance) : minOut);
-        }
-
-        // Added assets, in target order, with their target weights.
-        address[] memory added = new address[](newAssets.length);
-        uint16[] memory addedWeights = new uint16[](newAssets.length);
-        uint256 nAdded;
-        for (uint256 i = 0; i < newAssets.length; ++i) {
-            bool present;
-            for (uint256 j = 0; j < _basketAssets.length; ++j) {
-                if (_basketAssets[j] == newAssets[i]) {
-                    present = true;
-                    break;
-                }
-            }
-            if (!present) {
-                added[nAdded] = newAssets[i];
-                addedWeights[nAdded] = newWeightsBps[i];
-                nAdded++;
-            }
-        }
-        if (buyMinOuts.length != 0 && buyMinOuts.length != nAdded) {
-            revert MinOutsLengthMismatch(nAdded, buyMinOuts.length);
-        }
-
-        // The buy leg needs the route to pull the settlement asset, and later sells/withdrawals
-        // need the token leg.
-        for (uint256 i = 0; i < nAdded; ++i) {
-            address a = added[i];
-            address route = registry.assetConfig(a).liquidityRoute;
-            SafeERC20.forceApprove(IERC20(asset()), route, type(uint256).max);
-            SafeERC20.forceApprove(IERC20(a), route, type(uint256).max);
-        }
-
-        uint256 addedWeightSum;
-        for (uint256 i = 0; i < nAdded; ++i) addedWeightSum += addedWeights[i];
-        uint256 settlementBalance = IERC20(asset()).balanceOf(address(this));
-        for (uint256 i = 0; i < nAdded; ++i) {
-            address a = added[i];
-            uint256 alloc = settlementBalance.mulDiv(addedWeights[i], addedWeightSum);
-            if (alloc == 0) continue;
-            uint256 minOut = buyMinOuts.length != 0 ? buyMinOuts[i] : 0;
-            ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(
-                asset(), a, alloc, minOut == 0 ? _buyMinOut(a, alloc) : minOut
-            );
-        }
-
+        MigrationLib.migrate(this, newAssets, newWeightsBps, sellMinOuts, buyMinOuts);
         _basketAssets = newAssets;
         _basketWeightsBps = newWeightsBps;
     }
@@ -975,96 +839,6 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             slippageBps < MIN_REBALANCE_SLIPPAGE_BPS || slippageBps > MAX_REBALANCE_SLIPPAGE_BPS
                 || slippageBps > maxSlippageBps
         ) revert InvalidRebalanceSlippage(slippageBps);
-    }
-
-    function _weightsBpsOf(uint256 nav) internal view returns (uint256[] memory weightsBps) {
-        uint256 n = _basketAssets.length;
-        weightsBps = new uint256[](n);
-        if (nav == 0) return weightsBps;
-        for (uint256 i = 0; i < n; ++i) {
-            address a = _basketAssets[i];
-            weightsBps[i] = _valueSettlement(a, IERC20(a).balanceOf(address(this))).mulDiv(BPS_DENOMINATOR, nav);
-        }
-    }
-
-    /// @dev Sells each overweight asset down to its target weight; returns the settlement actually
-    /// received. Reverts if an explicit min out is more permissive than the vault default.
-    function _sellOverweight(uint256 nav, uint256[] calldata minAmountsOut)
-        internal
-        returns (uint256 soldValueSettlement)
-    {
-        uint256 n = _basketAssets.length;
-        bool explicitMins = minAmountsOut.length != 0;
-        for (uint256 i = 0; i < n; ++i) {
-            address a = _basketAssets[i];
-            uint256 value = _valueSettlement(a, IERC20(a).balanceOf(address(this)));
-            uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
-            if (value <= target) continue;
-            uint256 tokensToSell = _buyQuote(a, value - target);
-            if (tokensToSell == 0) continue;
-            uint256 defaultMin = _rebalanceSellMinOut(a, tokensToSell);
-            uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
-            if (minOut < defaultMin) revert RebalanceMinTooPermissive(i, minOut, defaultMin);
-            soldValueSettlement += _sell(a, tokensToSell, minOut);
-        }
-    }
-
-    /// @dev Buys each underweight asset back toward its target weight, distributing the vault's
-    /// available settlement proportionally to the deficits. Reverts if an explicit min out is more
-    /// permissive than the vault default.
-    function _buyUnderweight(uint256 nav, uint256[] calldata minAmountsOut)
-        internal
-        returns (uint256 boughtValueSettlement)
-    {
-        uint256 n = _basketAssets.length;
-        IERC20 settlement = IERC20(asset());
-        uint256 pool = settlement.balanceOf(address(this));
-        if (pool == 0) return 0;
-
-        uint256 totalDeficit;
-        uint256[] memory deficits = new uint256[](n);
-        for (uint256 i = 0; i < n; ++i) {
-            address a = _basketAssets[i];
-            uint256 value = _valueSettlement(a, IERC20(a).balanceOf(address(this)));
-            uint256 target = nav.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
-            if (value < target) {
-                deficits[i] = target - value;
-                totalDeficit += deficits[i];
-            }
-        }
-        if (totalDeficit == 0) return 0;
-
-        bool explicitMins = minAmountsOut.length != 0;
-        for (uint256 i = 0; i < n; ++i) {
-            uint256 deficit = deficits[i];
-            if (deficit == 0) continue;
-            address a = _basketAssets[i];
-            uint256 alloc = pool.mulDiv(deficit, totalDeficit);
-            if (alloc == 0) continue;
-            uint256 defaultMin = _rebalanceBuyMinOut(a, alloc);
-            uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
-            if (minOut < defaultMin) revert RebalanceMinTooPermissive(i, minOut, defaultMin);
-            ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(asset(), a, alloc, minOut);
-            boughtValueSettlement += alloc;
-        }
-    }
-
-    /// @dev Measured gas reimbursement in settlement wei: actual gas used times the transaction
-    /// gas price, converted at the fixed ETH price cap and clamped to `MAX_GAS_REBATE`.
-    function _gasRebate(uint256 startGas) internal view returns (uint256) {
-        uint256 gasUsed = startGas - gasleft();
-        uint256 rebateSettlement = gasUsed * tx.gasprice * ETH_SETTLEMENT_PRICE_CAP / 1e18;
-        return rebateSettlement > MAX_GAS_REBATE ? MAX_GAS_REBATE : rebateSettlement;
-    }
-
-    /// @dev Settlement quote for a token sell, discounted by the collective rebalance slippage bound.
-    function _rebalanceSellMinOut(address a, uint256 tokenAmount) internal view returns (uint256) {
-        return _valueSettlement(a, tokenAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
-    }
-
-    /// @dev Token quote for a settlement buy, discounted by the collective rebalance slippage bound.
-    function _rebalanceBuyMinOut(address a, uint256 settlementAmount) internal view returns (uint256) {
-        return _buyQuote(a, settlementAmount).mulDiv(BPS_DENOMINATOR - rebalanceSlippageBps, BPS_DENOMINATOR);
     }
 
     // ---------------------------------------------------------------------
