@@ -7,9 +7,19 @@ optimizer = true
 optimizer_runs = 200
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 
-[invariant]
+# Dev loop: `forge test` runs the invariant/fuzz suites as a fast smoke check (~10-20 s) so
+# development stays quick. The full 10,000-run validation (F003/S002 acceptance criterion) runs
+# under the release profile: `FOUNDRY_PROFILE=release forge test` (or with --match-contract
+# InvariantTest for just the hardening suites).
+[profile.default.invariant]
+runs = 100
+depth = 10
+fail_on_revert = false
+
+[profile.release.invariant]
 # F003-S002: 10,000+ sequences per invariant contract; handler reverts are legitimate state
-# transitions (guards firing), never failures. Depth balances coverage with wall-clock time.
+# transitions (guards firing), never failures. Depth balances coverage with wall-clock time
+# (~20 min for the full run).
 runs = 10000
 depth = 25
 fail_on_revert = false
