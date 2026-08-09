@@ -6,3 +6,10 @@ via_ir = true
 optimizer = true
 optimizer_runs = 200
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
+
+[invariant]
+# F003-S002: 10,000+ sequences per invariant contract; handler reverts are legitimate state
+# transitions (guards firing), never failures. Depth balances coverage with wall-clock time.
+runs = 10000
+depth = 25
+fail_on_revert = false
