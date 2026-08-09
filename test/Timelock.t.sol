@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {AssetRegistry} from "../src/AssetRegistry.sol";
 import {EquiVault} from "../src/EquiVault.sol";
@@ -521,5 +522,88 @@ contract TimelockTest is Test {
         vm.prank(bob);
         vault.deposit(150e6, bob);
         assertGt(vault.balanceOf(bob), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // B001: reallocation to a strictly smaller basket must reinvest the freed
+    // settlement into the kept assets (no idle USDC outside totalAssets()).
+    // ------------------------------------------------------------------
+
+    function testReallocationToSmallerBasketReinvestsFreedSettlement() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, BOUND_AB);
+        _fundAndApprove(address(vault), alice, 1_000e6);
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+
+        uint256 navBefore = vault.totalAssets();
+        address[] memory target = new address[](1);
+        target[0] = address(tokenA);
+        uint16[] memory weights = new uint16[](1);
+        weights[0] = 10_000;
+        vm.prank(manager);
+        vault.proposeReallocation(target, weights, 1_000_000e6);
+        vm.warp(block.timestamp + 1 days + 1);
+        _refreshPrices();
+
+        vm.prank(bob);
+        vault.executeReallocation(new uint256[](0), new uint256[](0));
+
+        // tokenB was sold and the proceeds fully reinvested into tokenA.
+        assertEq(vault.basketAssets().length, 1);
+        assertEq(vault.basketAssets()[0], address(tokenA));
+        assertLt(usdc.balanceOf(address(vault)), 1e6); // < 1 USDC of swap dust
+
+        // NAV continuity: only the migration swap costs are lost, bounded by the vault slippage.
+        uint256 navAfter = vault.totalAssets();
+        assertGe(navBefore, navAfter);
+        assertGt(navAfter, navBefore * 9_700 / 10_000); // maxSlippageBps 3 % on sell + buy
+    }
+
+    function testReallocationToSubsetKeepsExactTargetWeight() public {
+        // [A, B, C] -> [B, C] (5000/5000): B is kept, C is bought up to its target weight with the
+        // freed settlement; the basket reaches the new weights exactly.
+        address[] memory a3 = new address[](3);
+        a3[0] = address(tokenA);
+        a3[1] = address(tokenB);
+        a3[2] = address(tokenC);
+        uint16[] memory w3 = new uint16[](3);
+        w3[0] = 5_000;
+        w3[1] = 3_000;
+        w3[2] = 2_000;
+        EquiVault vault = new EquiVault(
+            usdc, registry, manager, a3, w3, 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0
+        );
+        _fundAndApprove(address(vault), alice, 1_000e6);
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+
+        address[] memory target = new address[](2);
+        target[0] = address(tokenB);
+        target[1] = address(tokenC);
+        uint16[] memory weights = _weights(5_000, 5_000);
+        vm.prank(manager);
+        vault.proposeReallocation(target, weights, 1_000_000e6);
+        vm.warp(block.timestamp + 1 days + 1);
+        _refreshPrices();
+
+        vm.prank(bob);
+        vault.executeReallocation(new uint256[](0), new uint256[](0));
+
+        assertEq(vault.basketAssets().length, 2);
+        assertEq(vault.basketAssets()[0], address(tokenB));
+        assertEq(vault.basketAssets()[1], address(tokenC));
+        assertLt(usdc.balanceOf(address(vault)), 1e6);
+        // B (kept) should hold ~50 % of the NAV and C ~50 %, within swap rounding.
+        uint256 nav = vault.totalAssets();
+        uint256 bValue = _valueUsdc(address(tokenB), tokenB.balanceOf(address(vault)));
+        uint256 cValue = _valueUsdc(address(tokenC), tokenC.balanceOf(address(vault)));
+        assertApproxEqAbs(Math.mulDiv(bValue, 10_000, nav), 5_000, 100);
+        assertApproxEqAbs(Math.mulDiv(cValue, 10_000, nav), 5_000, 100);
+    }
+
+    function _valueUsdc(address a, uint256 amount) internal view returns (uint256) {
+        (uint256 price,) = registry.getPrice(a, address(usdc));
+        uint256 scale = 10 ** uint256(registry.assetConfig(a).decimals);
+        return Math.mulDiv(amount, price * 1e6, scale * 1e18);
     }
 }

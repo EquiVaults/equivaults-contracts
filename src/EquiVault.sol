@@ -455,8 +455,10 @@ contract EquiVault is ERC4626, ReentrancyGuard {
 
     /// @dev Permissionless once `executableAt` is reached. Re-validates the target (asset statuses
     /// and registry caps may have changed since propose), then migrates the basket: removed assets
-    /// are sold to the settlement asset and added assets are bought from the freed balance, each bounded by
-    /// `sellMinOuts`/`buyMinOuts` in removed/added order (0 = vault default slippage bound).
+    /// are sold to the settlement asset and the freed balance is reinvested toward the new target
+    /// weights by deficit (kept and added assets alike), so no settlement is left idle outside
+    /// `totalAssets()`. Bounded by `sellMinOuts` in removed order and `buyMinOuts` in new-basket
+    /// order (0 = vault default slippage bound).
     function executeReallocation(uint256[] calldata sellMinOuts, uint256[] calldata buyMinOuts)
         external
         nonReentrant
@@ -813,9 +815,9 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     }
 
     /// @dev Migrates the held basket toward the proposal target: sells removed assets entirely to
-    /// the settlement asset, buys added assets proportionally to their target weights from the
-    /// freed balance, and approves each new liquidity route. Kept assets keep their positions;
-    /// weight drift is left to the rebalance engine. The swap/approval work runs in `MigrationLib`
+    /// the settlement asset, reinvests the freed balance toward the new target weights by deficit
+    /// (kept and added assets alike), and approves each new liquidity route. Kept assets are never
+    /// sold; residual drift is left to the rebalance engine. The swap/approval work runs in `MigrationLib`
     /// (DELEGATECALL, so the vault's context and route allowances apply) to keep this runtime under
     /// the EIP-170 code-size limit; only the basket arrays are written here.
     function _migrateBasket(

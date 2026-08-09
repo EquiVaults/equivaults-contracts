@@ -428,6 +428,12 @@ contract EquiVaultInvariantTest is InvariantBase {
         assertFalse(handler.ghostCapViolation());
     }
 
+    /// @dev B001 regression: migrations reinvest the freed settlement; no idle settlement outside
+    /// `totalAssets()`.
+    function invariant_noOrphanSettlement() public {
+        assertLe(usdc.balanceOf(address(vault)), 1e4);
+    }
+
     /// @dev Share claims are always backed: full redemption of every tracked holder is feasible.
     function invariant_claimsBacked() public {
         uint256 nav = vault.totalAssets();
@@ -942,6 +948,13 @@ contract ProtocolStressInvariantTest is InvariantBase {
     /// @dev AUM cap is enforced: no deposit ever slipped past the cap check.
     function invariant_capEnforced() public {
         assertFalse(handler.ghostCapViolation());
+    }
+
+    /// @dev B001 regression: after any sequence (including reallocations to strictly smaller
+    /// baskets), the vault holds no meaningful settlement outside `totalAssets()` — migrations
+    /// reinvest the freed balance toward the new target weights.
+    function invariant_noOrphanSettlement() public {
+        assertLe(usdc.balanceOf(address(vault)), 1e4); // < 0.01 settlement unit of rounding dust
     }
 
     /// @dev Gas reimbursement is bounded by the protocol cap per rebalance, and the total paid out

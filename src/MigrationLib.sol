@@ -25,9 +25,10 @@ library MigrationLib {
     error MinOutsLengthMismatch(uint256 expected, uint256 actual);
 
     /// @dev Migrates the held basket toward the proposal target: sells removed assets entirely to
-    /// the settlement asset, buys added assets proportionally to their target weights from the
-    /// freed balance, and approves each new liquidity route. Kept assets keep their positions;
-    /// weight drift is left to the rebalance engine.
+    /// the settlement asset, then reinvests the freed balance into the new basket by target-weight
+    /// deficit (kept and added assets alike), so no settlement is ever left idle outside
+    /// `totalAssets()` (B001). Kept assets already at or above their target weight are not sold;
+    /// residual drift is left to the rebalance engine. Approves each newly-added liquidity route.
     function migrate(
         EquiVault vault,
         address[] calldata newAssets,
@@ -62,48 +63,58 @@ library MigrationLib {
             _sell(vault, a, balance, minOut == 0 ? _sellMinOut(vault, a, balance) : minOut);
         }
 
-        // Added assets, in target order, with their target weights.
-        address[] memory added = new address[](newAssets.length);
-        uint16[] memory addedWeights = new uint16[](newAssets.length);
-        uint256 nAdded;
-        for (uint256 i = 0; i < newAssets.length; ++i) {
-            bool present;
-            for (uint256 j = 0; j < currentAssets.length; ++j) {
-                if (currentAssets[j] == newAssets[i]) {
-                    present = true;
-                    break;
-                }
-            }
-            if (!present) {
-                added[nAdded] = newAssets[i];
-                addedWeights[nAdded] = newWeightsBps[i];
-                nAdded++;
-            }
-        }
-        if (buyMinOuts.length != 0 && buyMinOuts.length != nAdded) {
-            revert MinOutsLengthMismatch(nAdded, buyMinOuts.length);
+        // New-basket buy leg: reinvest the freed settlement toward the target weights by deficit
+        // (kept and added assets alike), in `newAssets` order. `buyMinOuts` is indexed on the new
+        // basket when non-empty; 0 (or an empty array) falls back to the vault default bound.
+        if (buyMinOuts.length != 0 && buyMinOuts.length != newAssets.length) {
+            revert MinOutsLengthMismatch(newAssets.length, buyMinOuts.length);
         }
 
         address settlement = vault.asset();
-        // The buy leg needs the route to pull the settlement asset, and later sells/withdrawals
-        // need the token leg.
-        for (uint256 i = 0; i < nAdded; ++i) {
-            address a = added[i];
-            address route = vault.registry().assetConfig(a).liquidityRoute;
-            SafeERC20.forceApprove(IERC20(settlement), route, type(uint256).max);
-            SafeERC20.forceApprove(IERC20(a), route, type(uint256).max);
+        // Approve the routes of assets that are not part of the current basket (kept assets were
+        // approved at construction or by a previous migration).
+        uint256 keptValue;
+        uint256[] memory currentValues = new uint256[](newAssets.length);
+        for (uint256 i = 0; i < newAssets.length; ++i) {
+            address a = newAssets[i];
+            bool kept;
+            for (uint256 j = 0; j < currentAssets.length; ++j) {
+                if (currentAssets[j] == a) {
+                    kept = true;
+                    break;
+                }
+            }
+            if (!kept) {
+                address route = vault.registry().assetConfig(a).liquidityRoute;
+                SafeERC20.forceApprove(IERC20(settlement), route, type(uint256).max);
+                SafeERC20.forceApprove(IERC20(a), route, type(uint256).max);
+            }
+            uint256 bal = IERC20(a).balanceOf(address(vault));
+            currentValues[i] = _valueSettlement(vault, a, bal);
+            keptValue += currentValues[i];
         }
 
-        uint256 addedWeightSum;
-        for (uint256 i = 0; i < nAdded; ++i) addedWeightSum += addedWeights[i];
         uint256 settlementBalance = IERC20(settlement).balanceOf(address(vault));
-        for (uint256 i = 0; i < nAdded; ++i) {
-            address a = added[i];
-            uint256 alloc = settlementBalance.mulDiv(addedWeights[i], addedWeightSum);
+        uint256 navBasis = keptValue + settlementBalance; // value the freed settlement must reach
+        uint256 totalDeficit;
+        uint256[] memory deficits = new uint256[](newAssets.length);
+        for (uint256 i = 0; i < newAssets.length; ++i) {
+            uint256 target = navBasis.mulDiv(newWeightsBps[i], BPS_DENOMINATOR);
+            if (target > currentValues[i]) {
+                deficits[i] = target - currentValues[i];
+                totalDeficit += deficits[i];
+            }
+        }
+
+        // Sum of deficits >= freed settlement (any overweight kept asset only adds to it), so the
+        // proportional allocation below always spends the full balance, down to sub-wei dust.
+        for (uint256 i = 0; i < newAssets.length; ++i) {
+            if (deficits[i] == 0) continue;
+            uint256 alloc = settlementBalance.mulDiv(deficits[i], totalDeficit);
             if (alloc == 0) continue;
             uint256 minOut = buyMinOuts.length != 0 ? buyMinOuts[i] : 0;
-            ISwapRouter(vault.registry().assetConfig(a).liquidityRoute).swapExactIn(
-                settlement, a, alloc, minOut == 0 ? _buyMinOut(vault, a, alloc) : minOut
+            ISwapRouter(vault.registry().assetConfig(newAssets[i]).liquidityRoute).swapExactIn(
+                settlement, newAssets[i], alloc, minOut == 0 ? _buyMinOut(vault, newAssets[i], alloc) : minOut
             );
         }
     }
