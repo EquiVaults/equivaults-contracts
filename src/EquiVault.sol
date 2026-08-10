@@ -375,13 +375,12 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     // Vault views
     // ---------------------------------------------------------------------
 
-    /// @notice True while any basket asset cannot currently be priced (both oracles invalid).
+    /// @notice True while a basket asset cannot be safely rebalanced: both price sources are
+    /// invalid or the registry forbids opening further exposure to it (ExitOnly/Quarantined).
+    /// @dev Withdrawals remain governed separately by `_requireCanExit`; this guard only stops
+    /// operations that could buy an asset after the registry has put it in exit-only mode.
     function paused() public view returns (bool) {
-        uint256 n = _basketAssets.length;
-        for (uint256 i = 0; i < n; ++i) {
-            if (!_isPriced(_basketAssets[i])) return true;
-        }
-        return false;
+        return RebalanceLib.isPaused(this);
     }
 
     function basketAssets() external view returns (address[] memory) {

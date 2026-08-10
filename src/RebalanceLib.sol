@@ -27,6 +27,25 @@ library RebalanceLib {
     /// with the vault (identical selector and payload).
     error RebalanceMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
 
+    /// @dev True when a basket asset cannot be safely rebalanced because it is no longer Active
+    /// in the registry or cannot be priced. Keeping this loop in the linked library preserves
+    /// enough VaultFactory bytecode headroom under EIP-170.
+    function isPaused(EquiVault vault) external view returns (bool) {
+        AssetRegistry registry = vault.registry();
+        address settlement = vault.asset();
+        address[] memory assets = vault.basketAssets();
+        for (uint256 i = 0; i < assets.length; ++i) {
+            address a = assets[i];
+            if (!registry.canOpenExposure(a)) return true;
+            try registry.getPrice(a, settlement) returns (uint256 price, uint256) {
+                if (price == 0) return true;
+            } catch {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// @dev Max absolute deviation (in bps of NAV) of any basket asset from its target weight.
     /// The basket is rebalanceable when `maxDeviationBps` exceeds the vault's drift threshold.
     function measureDrift(EquiVault vault) external view returns (uint256 maxDeviationBps, bool aboveThreshold) {

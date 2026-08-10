@@ -355,6 +355,20 @@ contract RebalanceEngineTest is Test {
         _rebalance(vault, new uint256[](0));
     }
 
+    function testRebalanceCannotReopenExitOnlyExposure() public {
+        EquiVault vault = _fundedVaultWithDrift(EquiVault.TimelockMode.Instant, 0);
+
+        // A is above target, so a rebalance would sell A and buy the underweight B. Once B is
+        // ExitOnly, the registry's promise is that no operation may create new B exposure.
+        vm.prank(admin);
+        registry.setAssetStatus(address(tokenB), AssetRegistry.AssetStatus.ExitOnly);
+
+        assertTrue(vault.paused());
+        assertFalse(engine.needsRebalance(vault));
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.VaultPaused.selector));
+        _rebalance(vault, new uint256[](0));
+    }
+
     function testRebalanceCannotRunTwiceInARow() public {
         EquiVault vault = _fundedVaultWithDrift(EquiVault.TimelockMode.Instant, 0);
 

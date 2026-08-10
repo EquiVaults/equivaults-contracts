@@ -928,18 +928,18 @@ contract ProtocolStressInvariantTest is InvariantBase {
         assertEq(vault.balanceOf(keeper), 0);
     }
 
-    /// @dev Pause consistency: the vault's pause flag always matches the oracle state of the
-    /// assets actually in the basket (out-of-basket oracle failures are irrelevant), and no
-    /// deposit/redemption/rebalance ever succeeded while it should have been blocked.
+    /// @dev Pause consistency: the vault's rebalance-pause flag matches the basket state.
+    /// It is set when an in-basket oracle fails or when the registry makes an asset ExitOnly /
+    /// Quarantined, because a rebalance could otherwise buy new exposure to that asset.
     function invariant_pauseConsistency() public {
         address[] memory basket = vault.basketAssets();
-        bool ghostPaused;
+        bool ghostPaused = registry.depositsPaused();
         for (uint256 i = 0; i < basket.length; ++i) {
             address a = basket[i];
             bool fail = (a == address(tokenA) && handler.ghostFailA())
                 || (a == address(tokenB) && handler.ghostFailB())
                 || (a == address(tokenC) && handler.ghostFailC());
-            if (fail) ghostPaused = true;
+            if (fail || registry.assetConfig(a).status != AssetRegistry.AssetStatus.Active) ghostPaused = true;
         }
         assertEq(vault.paused(), ghostPaused);
         assertFalse(handler.ghostPauseViolation());
