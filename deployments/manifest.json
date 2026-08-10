@@ -1,6 +1,6 @@
 {
   "schema": "equivaults-integration-artifacts/v1",
-  "contractsCommit": "34afea1f62dd34619e20f0aaa89b81b0b7a37723",
+  "contractsCommit": "717f7adafdb43d09074ad88a533b17608ea87478",
   "generatedAt": "2026-08-09",
   "abiDir": "abi",
   "abiFiles": [
