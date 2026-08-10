@@ -180,10 +180,11 @@ contract EquiVaultTest is Test {
         uint256 expectedB = _poolOut(poolB, address(usdc), address(tokenB), allocB);
 
         vm.prank(alice);
-        uint256 shares = vault.deposit(depositAmount, alice);
+        uint256 shares = enterVault(vault, depositAmount, alice);
 
-        // Par at genesis: virtual shares/assets cancel, 1 USDC = 1e6 shares.
-        assertEq(shares, depositAmount * SHARE_SCALE);
+        // Shares reflect the basket value actually received after pool fees, not settlement input.
+        uint256 expectedNav = _valueUsdc(address(tokenA), expectedA) + _valueUsdc(address(tokenB), expectedB);
+        assertEq(shares, expectedNav * SHARE_SCALE);
         assertEq(vault.balanceOf(alice), shares);
         assertEq(vault.costBasis(alice), depositAmount);
 
@@ -192,7 +193,6 @@ contract EquiVaultTest is Test {
 
         // Only dust USDC stays in the vault; NAV = tokens valued at oracle prices.
         assertLt(usdc.balanceOf(address(vault)), 1e6);
-        uint256 expectedNav = _valueUsdc(address(tokenA), expectedA) + _valueUsdc(address(tokenB), expectedB);
         assertEq(vault.totalAssets(), expectedNav);
     }
 
@@ -206,7 +206,7 @@ contract EquiVaultTest is Test {
         impossible[1] = 0;
         vm.expectRevert(abi.encodeWithSelector(ISwapRouter.SlippageExceeded.selector, type(uint256).max, expectedOut));
         vm.prank(alice);
-        vault.deposit(1_000e6, alice, impossible);
+        enterVaultWithMins(vault, 1_000e6, alice, impossible, 0);
 
         uint256[] memory wrongLength = new uint256[](1);
         wrongLength[0] = 0;
@@ -214,31 +214,27 @@ contract EquiVaultTest is Test {
             abi.encodeWithSelector(EquiVault.MinOutsLengthMismatch.selector, uint256(2), uint256(1))
         );
         vm.prank(alice);
-        vault.deposit(1_000e6, alice, wrongLength);
+        enterVaultWithMins(vault, 1_000e6, alice, wrongLength, 0);
     }
 
-    function testNoProtocolMinimumTicket() public {
+    function testTinyEntryThatCannotBuyAnyTokenReverts() public {
         _fundAndApprove(alice, 1);
         vm.prank(alice);
-        uint256 shares = vault.deposit(1, alice);
-        assertEq(shares, 1 * SHARE_SCALE);
-
-        vm.prank(alice);
-        vault.redeem(shares, alice, alice);
-        assertEq(vault.balanceOf(alice), 0);
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.EntrySharesBelowMinimum.selector, uint256(0), uint256(0)));
+        enterVault(vault, 1, alice);
     }
 
-    function testMintAndWithdrawStandardFlows() public {
+    function testEnterAndExitCustomFlow() public {
         _fundAndApprove(alice, 2_000e6);
         vm.prank(alice);
-        uint256 assetsUsed = vault.mint(1_000e6 * SHARE_SCALE, alice);
-        assertEq(assetsUsed, 1_000e6);
+        uint256 shares = enterVault(vault, 1_000e6, alice);
+        assertGt(shares, 0);
 
-        uint256 balanceAfterMint = usdc.balanceOf(alice);
+        uint256 balanceAfterEnter = usdc.balanceOf(alice);
         vm.prank(alice);
-        uint256 burned = vault.withdraw(400e6, alice, alice);
-        assertEq(vault.balanceOf(alice), 1_000e6 * SHARE_SCALE - burned);
-        assertApproxEqAbs(usdc.balanceOf(alice) - balanceAfterMint, 400e6, 10e6);
+        uint256 settlementOut = exitVault(vault, shares * 40 / 100, alice, new bool[](0));
+        assertEq(vault.balanceOf(alice), shares * 60 / 100);
+        assertEq(usdc.balanceOf(alice) - balanceAfterEnter, settlementOut);
     }
 
     // ------------------------------------------------------------------
@@ -249,9 +245,9 @@ contract EquiVaultTest is Test {
         _fundAndApprove(alice, 1_000e6);
         _fundAndApprove(bob, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.prank(bob);
-        vault.deposit(1_000e6, bob);
+        enterVault(vault, 1_000e6, bob);
 
         uint256 balA = tokenA.balanceOf(address(vault));
         uint256 balB = tokenB.balanceOf(address(vault));
@@ -261,7 +257,7 @@ contract EquiVaultTest is Test {
         ExitSim memory sim = _simulateExit(bob, exitShares, true, true);
 
         vm.prank(bob);
-        vault.redeem(exitShares, bob, bob);
+        exitVault(vault, exitShares, bob, new bool[](0));
 
         // Bob received exactly his proportional slice, net of swap costs (no fee: no realized gain).
         assertEq(usdc.balanceOf(bob), sim.usdcToUser);
@@ -272,14 +268,14 @@ contract EquiVaultTest is Test {
         // Remaining holder can still exit fully.
         uint256 aliceShares = vault.balanceOf(alice);
         vm.prank(alice);
-        vault.redeem(aliceShares, alice, alice);
+        exitVault(vault, aliceShares, alice, new bool[](0));
         assertEq(vault.balanceOf(alice), 0);
     }
 
     function testMixedExitPerAssetChoice() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         uint256 balB = tokenB.balanceOf(address(vault));
         uint256 total = vault.totalSupply();
@@ -293,7 +289,7 @@ contract EquiVaultTest is Test {
         flags[1] = false; // B -> token
 
         vm.prank(alice);
-        vault.redeem(shares, alice, alice, flags);
+        exitVault(vault, shares, alice, flags);
 
         assertEq(tokenB.balanceOf(alice), amountB); // exact proportional token share
         assertEq(usdc.balanceOf(alice), sim.usdcToUser);
@@ -306,7 +302,7 @@ contract EquiVaultTest is Test {
     function testSharesAreNonTransferable() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         bool unused;
         vm.expectRevert(EquiVault.SharesNonTransferable.selector);
@@ -322,12 +318,12 @@ contract EquiVaultTest is Test {
     function testPartialRedemptionsKeepCostBasisExact() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         // Exit 40 % at cost: no gain, realized cost removed proportionally.
         uint256 fortyPct = vault.balanceOf(alice) * 40 / 100;
         vm.prank(alice);
-        vault.redeem(fortyPct, alice, alice);
+        exitVault(vault, fortyPct, alice, new bool[](0));
         assertEq(vault.costBasis(alice), 600e6);
 
         // Price of A doubles; exit the remaining 60 %.
@@ -336,7 +332,7 @@ contract EquiVaultTest is Test {
         ExitSim memory sim = _simulateExit(alice, remaining, true, true);
 
         vm.prank(alice);
-        vault.redeem(remaining, alice, alice);
+        exitVault(vault, remaining, alice, new bool[](0));
 
         assertEq(vault.costBasis(alice), 0);
         assertEq(usdc.balanceOf(manager), sim.managerShare);
@@ -350,7 +346,7 @@ contract EquiVaultTest is Test {
     function testPerformanceFeeOnRealizedGain() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         _doublePriceA();
 
@@ -358,7 +354,7 @@ contract EquiVaultTest is Test {
         ExitSim memory sim = _simulateExit(alice, shares, true, true);
 
         vm.prank(alice);
-        vault.redeem(shares, alice, alice);
+        exitVault(vault, shares, alice, new bool[](0));
 
         // 90 % to the manager, 10 % to the treasury, exact from the simulated pool proceeds.
         assertEq(usdc.balanceOf(manager), sim.managerShare);
@@ -373,7 +369,7 @@ contract EquiVaultTest is Test {
     function testFeeCollectedEvenOnTokenExits() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         _doublePriceA();
 
@@ -383,7 +379,7 @@ contract EquiVaultTest is Test {
         bool[] memory flags = new bool[](2); // both false: receive tokens
 
         vm.prank(alice);
-        vault.redeem(shares, alice, alice, flags);
+        exitVault(vault, shares, alice, flags);
 
         // Fee still collected in USDC (fee slices sold) on a pure token exit.
         assertGt(sim.feePot, 0);
@@ -397,12 +393,12 @@ contract EquiVaultTest is Test {
     function testNoFeeWhenNoRealizedGain() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         // Exit at cost: entry costs make NAV slightly below principal -> no gain, no fee.
         uint256 shares = vault.balanceOf(alice);
         vm.prank(alice);
-        vault.redeem(shares, alice, alice);
+        exitVault(vault, shares, alice, new bool[](0));
 
         assertEq(usdc.balanceOf(manager), 0);
         assertEq(usdc.balanceOf(treasury), 0);
@@ -424,9 +420,9 @@ contract EquiVaultTest is Test {
         vm.prank(bob);
         usdc.approve(address(vault2), 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.prank(bob);
-        vault2.deposit(1_000e6, bob);
+        enterVault(vault2, 1_000e6, bob);
 
         primaryA.setFails(true);
         fallbackA.setFails(true);
@@ -437,34 +433,34 @@ contract EquiVaultTest is Test {
         // Deposits and redemptions on the affected vault revert.
         vm.prank(bob);
         vm.expectRevert(EquiVault.VaultPaused.selector);
-        vault.deposit(1_000e6, bob);
+        enterVault(vault, 1_000e6, bob);
         uint256 aliceShares = vault.balanceOf(alice);
         vm.prank(alice);
         vm.expectRevert(EquiVault.VaultPaused.selector);
-        vault.redeem(aliceShares, alice, alice);
+        exitVault(vault, aliceShares, alice, new bool[](0));
 
         // The unaffected vault keeps operating.
         uint256 bobShares = vault2.balanceOf(bob);
         vm.prank(bob);
-        vault2.redeem(bobShares, bob, bob);
+        exitVault(vault2, bobShares, bob, new bool[](0));
         assertEq(vault2.balanceOf(bob), 0);
     }
 
     function testExitOnlyBlocksDepositsNotWithdrawals() public {
         _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         vm.prank(admin);
         registry.setAssetStatus(address(tokenA), AssetRegistry.AssetStatus.ExitOnly);
 
         vm.prank(alice);
         vm.expectRevert(EquiVault.VaultPaused.selector);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         uint256 shares = vault.balanceOf(alice);
         vm.prank(alice);
-        vault.redeem(shares, alice, alice);
+        exitVault(vault, shares, alice, new bool[](0));
         assertEq(vault.balanceOf(alice), 0);
     }
 
@@ -472,37 +468,101 @@ contract EquiVaultTest is Test {
     // Inflation attack mitigation
     // ------------------------------------------------------------------
 
-    function testInflationAttackCannotProfitAndKeepsVaultUsable() public {
-        // First depositor: 1 wei, tiny share.
-        _fundAndApprove(alice, 1);
+    function testBasketDonationCannotBeExtractedByLaterEntrant() public {
+        _fundAndApprove(alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1, alice);
+        enterVault(vault, 1_000e6, alice);
 
-        // Attacker donates a huge amount then deposits and withdraws.
-        _fundAndApprove(bob, 2 * 1e11);
+        // Donate a basket token, then enter/exit as a different account. The entrant only mints
+        // shares for the basket value their own swaps actually add; they cannot claim the donation.
+        tokenA.mint(bob, 10e18);
         vm.prank(bob);
-        bool donationOk = usdc.transfer(address(vault), 1e11); // donation inflates NAV
-        assertTrue(donationOk);
+        tokenA.transfer(address(vault), 10e18);
+        _fundAndApprove(bob, 1_000e6);
         vm.prank(bob);
-        uint256 atkShares = vault.deposit(1e11, bob);
+        uint256 attackerShares = enterVault(vault, 1_000e6, bob);
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
-        vault.redeem(atkShares, bob, bob);
-        uint256 bobReceived = usdc.balanceOf(bob) - bobBefore;
+        exitVault(vault, attackerShares, bob, new bool[](0));
+        assertLt(usdc.balanceOf(bob) - bobBefore, 1_000e6);
 
-        // Attacker cannot profit: received less than his own deposit alone, the donation is lost.
-        assertLt(bobReceived, 1e11);
-
-        // A later honest depositor keeps ~all of his value (no dilution, vault still usable).
         _fundAndApprove(carol, 1_000e6);
         vm.prank(carol);
-        uint256 cShares = vault.deposit(1_000e6, carol);
-        uint256 carolBefore = usdc.balanceOf(carol);
-        vm.prank(carol);
-        vault.redeem(cShares, carol, carol);
-        uint256 carolReceived = usdc.balanceOf(carol) - carolBefore;
-        assertGe(carolReceived, 1_000e6 * 99 / 100);
+        uint256 laterShares = enterVault(vault, 1_000e6, carol);
+        assertGt(laterShares, 0);
+    }
+
+
+    function enterVault(EquiVault target, uint256 settlementIn, address receiver) internal returns (uint256) {
+        return target.enter(EquiVault.EnterParams({
+            settlementIn: settlementIn, receiver: receiver, minSharesOut: 0, minAmountsOut: new uint256[](0),
+            deadline: type(uint256).max, proposalId: 0
+        }));
+    }
+
+    function enterVaultWithMins(
+        EquiVault target, uint256 settlementIn, address receiver, uint256[] memory minAmountsOut, uint256 proposalId
+    ) internal returns (uint256) {
+        return target.enter(EquiVault.EnterParams({
+            settlementIn: settlementIn, receiver: receiver, minSharesOut: 0, minAmountsOut: minAmountsOut,
+            deadline: type(uint256).max, proposalId: proposalId
+        }));
+    }
+
+    function exitVault(EquiVault target, uint256 shares, address receiver, bool[] memory sellTokens)
+        internal
+        returns (uint256)
+    {
+        return target.exit(EquiVault.ExitParams({
+            shares: shares, receiver: receiver, sellTokens: sellTokens, minAmountsOut: new uint256[](0),
+            minSettlementOut: 0, deadline: type(uint256).max
+        }));
+    }
+
+    function testEntryMintsFromActualValueAndHonorsMinShares() public {
+        _fundAndApprove(alice, 1_000e6);
+        vm.prank(alice);
+        uint256 firstShares = enterVault(vault, 1_000e6, alice);
+        uint256 firstClaim = vault.quoteExitValue(firstShares);
+
+        _fundAndApprove(bob, 1_000e6);
+        uint256[] memory mins = new uint256[](0);
+        vm.prank(bob);
+        vm.expectRevert();
+        vault.enter(EquiVault.EnterParams({
+            settlementIn: 1_000e6,
+            receiver: bob,
+            minSharesOut: 1_000e6 * SHARE_SCALE,
+            minAmountsOut: mins,
+            deadline: type(uint256).max,
+            proposalId: 0
+        }));
+
+        vm.prank(bob);
+        enterVault(vault, 1_000e6, bob);
+        // The second entrant absorbs their own pool fee/price impact: Alice's oracle-valued
+        // proportional claim cannot decrease through the entry (B003).
+        assertApproxEqAbs(vault.quoteExitValue(firstShares), firstClaim, 100);
+    }
+
+    function testEntryAndExitRejectExpiredDeadline() public {
+        _fundAndApprove(alice, 1_000e6);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.DeadlineExpired.selector, block.timestamp));
+        vault.enter(EquiVault.EnterParams({
+            settlementIn: 1_000e6, receiver: alice, minSharesOut: 0, minAmountsOut: new uint256[](0),
+            deadline: block.timestamp - 1, proposalId: 0
+        }));
+
+        vm.prank(alice);
+        uint256 shares = enterVault(vault, 1_000e6, alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.DeadlineExpired.selector, block.timestamp));
+        vault.exit(EquiVault.ExitParams({
+            shares: shares, receiver: alice, sellTokens: new bool[](0), minAmountsOut: new uint256[](0),
+            minSettlementOut: 0, deadline: block.timestamp - 1
+        }));
     }
 
     // ------------------------------------------------------------------

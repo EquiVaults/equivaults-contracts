@@ -12,6 +12,41 @@ interface IERC20Like {
     function decimals() external view returns (uint8);
 }
 
+function enterVault(EquiVault vault, uint256 settlementIn, address receiver) returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: new uint256[](0),
+        deadline: type(uint256).max,
+        proposalId: 0
+    }));
+}
+
+function enterVaultWithMins(
+    EquiVault vault, uint256 settlementIn, address receiver, uint256[] memory minAmountsOut, uint256 proposalId
+) returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: minAmountsOut,
+        deadline: type(uint256).max,
+        proposalId: proposalId
+    }));
+}
+
+function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] memory sellTokens) returns (uint256) {
+    return vault.exit(EquiVault.ExitParams({
+        shares: shares,
+        receiver: receiver,
+        sellTokens: sellTokens,
+        minAmountsOut: new uint256[](0),
+        minSettlementOut: 0,
+        deadline: type(uint256).max
+    }));
+}
+
 /// @dev Fork tests against Robinhood Chain mainnet (chain ID 4663). The settlement asset is the
 /// REAL USDG (Global Dollar by Paxos, 6 decimals) — address verified on the official explorer and
 /// on-chain on 2026-08-05. Basket assets, oracles and swap routes remain mocked because real
@@ -93,7 +128,7 @@ contract ForkRobinhoodTest is Test {
         _fundUsdg(alice, 1_000e6);
         vm.startPrank(alice);
         MockToken(USDG).approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
 
         primaryA.setPrice(120e18, block.timestamp);

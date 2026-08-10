@@ -48,12 +48,14 @@ library ExitLib {
         uint256[] calldata amounts,
         bool[] calldata sellTokens,
         bool explicitFlags,
+        uint256[] calldata minAmountsOut,
         uint256 fee,
         uint256 valueWithdrawn
-    ) external returns (uint256 feePot) {
+    ) external returns (uint256 feePot, uint256 settlementOut) {
         address[] memory assets = vault.basketAssets();
         uint256 n = assets.length;
-        address settlement = vault.asset();
+        address settlement = address(vault.settlementAsset());
+        bool explicitMins = minAmountsOut.length != 0;
         for (uint256 i = 0; i < n; ++i) {
             address a = assets[i];
             uint256 toSell = amounts[i];
@@ -64,8 +66,12 @@ library ExitLib {
                 toSell = amounts[i] - feeSlice;
             }
             if (explicitFlags ? sellTokens[i] : true) {
-                uint256 settlementOut = _sell(vault, a, toSell, _sellMinOut(vault, a, toSell));
-                IERC20(settlement).safeTransfer(receiver, settlementOut);
+                uint256 defaultMin = _sellMinOut(vault, a, toSell);
+                uint256 minOut = explicitMins && minAmountsOut[i] != 0 ? minAmountsOut[i] : defaultMin;
+                if (minOut < defaultMin) revert EquiVault.ExitMinTooPermissive(i, minOut, defaultMin);
+                uint256 assetSettlementOut = _sell(vault, a, toSell, minOut);
+                settlementOut += assetSettlementOut;
+                IERC20(settlement).safeTransfer(receiver, assetSettlementOut);
             } else {
                 IERC20(a).safeTransfer(receiver, toSell);
             }
@@ -78,7 +84,7 @@ library ExitLib {
 
     function _sell(EquiVault vault, address a, uint256 tokenAmount, uint256 minOut) private returns (uint256) {
         address route = vault.registry().assetConfig(a).liquidityRoute;
-        return ISwapRouter(route).swapExactIn(a, vault.asset(), tokenAmount, minOut);
+        return ISwapRouter(route).swapExactIn(a, address(vault.settlementAsset()), tokenAmount, minOut);
     }
 
     /// @dev Settlement quote for a token sell, discounted by the vault default slippage bound.
@@ -94,7 +100,7 @@ library ExitLib {
     }
 
     function _priceOf(EquiVault vault, address a) private view returns (uint256) {
-        (uint256 price,) = vault.registry().getPrice(a, vault.asset());
+        (uint256 price,) = vault.registry().getPrice(a, address(vault.settlementAsset()));
         return price;
     }
 }

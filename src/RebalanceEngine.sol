@@ -43,7 +43,7 @@ contract RebalanceEngine {
 
         gasRebate = vault.rebalance(params);
         if (gasRebate > 0) {
-            IERC20(vault.asset()).safeTransfer(msg.sender, gasRebate);
+            IERC20(address(vault.settlementAsset())).safeTransfer(msg.sender, gasRebate);
         }
     }
 }

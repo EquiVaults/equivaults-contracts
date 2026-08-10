@@ -12,7 +12,7 @@ forge build
 rm -rf abi
 mkdir -p abi
 
-CONTRACTS="AssetRegistry EquiVault IERC20 IERC4626 IPriceOracle ISwapRouter RebalanceEngine VaultFactory"
+CONTRACTS="AssetRegistry EquiVault IERC20 IPriceOracle ISwapRouter RebalanceEngine VaultFactory"
 for c in $CONTRACTS; do
   src="out/$c.sol/$c.json"
   if [ ! -f "$src" ]; then

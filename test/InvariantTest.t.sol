@@ -15,6 +15,41 @@ import {ISwapRouter} from "../src/interfaces/ISwapRouter.sol";
 
 import {MockOracle, MockOracleRoute, MockToken} from "./mocks/Mocks.sol";
 
+function enterVault(EquiVault vault, uint256 settlementIn, address receiver) returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: new uint256[](0),
+        deadline: type(uint256).max,
+        proposalId: 0
+    }));
+}
+
+function enterVaultWithMins(
+    EquiVault vault, uint256 settlementIn, address receiver, uint256[] memory minAmountsOut, uint256 proposalId
+) returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: minAmountsOut,
+        deadline: type(uint256).max,
+        proposalId: proposalId
+    }));
+}
+
+function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] memory sellTokens) returns (uint256) {
+    return vault.exit(EquiVault.ExitParams({
+        shares: shares,
+        receiver: receiver,
+        sellTokens: sellTokens,
+        minAmountsOut: new uint256[](0),
+        minSettlementOut: 0,
+        deadline: type(uint256).max
+    }));
+}
+
 /// @dev F003-S002 (Invariant and Fuzz Testing Suite): shared protocol fixture. Settlement USDC
 /// (6 decimals), basket tokens A (18), B (6) and C (10 decimals). Every asset swaps through a
 /// zero-fee `MockOracleRoute`, so swaps settle exactly at the oracle price and the handler ghost
@@ -251,7 +286,9 @@ contract EquiVaultHandler is Test {
         uint256 n = vault.basketAssets().length;
         uint256[] memory mins = withMins ? new uint256[](n) : new uint256[](0);
 
-        try vault.deposit(amount, u, mins) returns (uint256 shares) {
+        try vault.enter(EquiVault.EnterParams({
+            settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: mins, deadline: type(uint256).max, proposalId: 0
+        })) returns (uint256 shares) {
             if (navAfter > vault.capAum()) ghostCapViolation = true;
             ghostShares[u] += shares;
             ghostCost[u] += amount;
@@ -280,7 +317,11 @@ contract EquiVaultHandler is Test {
 
         uint256 costBefore = vault.costBasis(u);
 
-        try vault.redeem(shares, u, u, flags) returns (uint256 valueWithdrawn) {
+        uint256 valueWithdrawn = vault.quoteExitValue(shares);
+        try vault.exit(EquiVault.ExitParams({
+            shares: shares, receiver: u, sellTokens: flags, minAmountsOut: new uint256[](0), minSettlementOut: 0,
+            deadline: type(uint256).max
+        })) returns (uint256) {
             uint256 realizedCost = costBefore.mulDiv(shares, sharesBefore);
             ghostCost[u] -= realizedCost;
             ghostShares[u] -= shares;
@@ -440,7 +481,7 @@ contract EquiVaultInvariantTest is InvariantBase {
         uint256 claim;
         address[3] memory users = _users();
         for (uint256 i = 0; i < users.length; ++i) {
-            claim += vault.previewRedeem(vault.balanceOf(users[i]));
+            claim += vault.quoteExitValue(vault.balanceOf(users[i]));
         }
         assertLe(claim, nav + 1);
     }
@@ -670,13 +711,19 @@ contract StressHandler is Test {
             uint256 navBefore = vault.totalAssets();
             uint256 navAfter = navBefore + amount;
             if (navAfter > vault.capAum() && seed % 4 != 0) return; // 1/4 still attempt to probe the guard
-            try vault.deposit(amount, u) returns (uint256 shares) {
+            try vault.enter(EquiVault.EnterParams({
+                settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: new uint256[](0),
+                deadline: type(uint256).max, proposalId: 0
+            })) returns (uint256 shares) {
                 if (navAfter > vault.capAum()) ghostCapViolation = true;
                 _recordDeposit(u, shares, amount);
             } catch {}
         } else {
             // Paused: attempt anyway; success would mean the pause guard is broken.
-            try vault.deposit(amount, u) returns (uint256 shares) {
+            try vault.enter(EquiVault.EnterParams({
+                settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: new uint256[](0),
+                deadline: type(uint256).max, proposalId: 0
+            })) returns (uint256 shares) {
                 ghostPauseViolation = true;
                 _recordDeposit(u, shares, amount);
             } catch {}
@@ -720,7 +767,11 @@ contract StressHandler is Test {
         uint256 costBefore = vault.costBasis(u);
         bool paused = vault.paused();
 
-        try vault.redeem(shares, u, u, flags) returns (uint256 valueWithdrawn) {
+        uint256 valueWithdrawn = vault.quoteExitValue(shares);
+        try vault.exit(EquiVault.ExitParams({
+            shares: shares, receiver: u, sellTokens: flags, minAmountsOut: new uint256[](0), minSettlementOut: 0,
+            deadline: type(uint256).max
+        })) returns (uint256) {
             if (paused) ghostPauseViolation = true;
             uint256 realizedCost = costBefore.mulDiv(shares, sharesBefore);
             ghostCost[u] -= realizedCost;
@@ -1005,9 +1056,9 @@ contract AttackToken is ERC20 {
     function _update(address from, address to, uint256 amount) internal override {
         if (armed && (from == address(vault) || to == address(vault))) {
             if (mode == 1) {
-                vault.deposit(1, address(this));
+                enterVault(vault, 1, address(this));
             } else if (mode == 2) {
-                vault.redeem(1, address(this), address(this));
+                exitVault(vault, 1, address(this), new bool[](0));
             } else if (mode == 3) {
                 uint256[] memory mins = new uint256[](0);
                 vault.rebalance(
@@ -1056,7 +1107,7 @@ contract AttackRoute is ISwapRouter {
     {
         if (armed) {
             if (mode == 2) {
-                vault.redeem(1, address(this), address(this));
+                exitVault(vault, 1, address(this), new bool[](0));
             } else if (mode == 3) {
                 uint256[] memory mins = new uint256[](0);
                 vault.rebalance(
@@ -1169,7 +1220,7 @@ contract ReentrancyInvariantTest is Test {
         usdc.mint(alice, amount);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(amount, alice);
+        enterVault(vault, amount, alice);
         vm.stopPrank();
     }
 
@@ -1187,7 +1238,7 @@ contract ReentrancyInvariantTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
         _expectGuard();
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
 
         assertEq(vault.totalSupply(), 0);
@@ -1196,7 +1247,7 @@ contract ReentrancyInvariantTest is Test {
 
         attackToken.disarm();
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         assertGt(vault.balanceOf(alice), 0);
     }
 
@@ -1208,7 +1259,7 @@ contract ReentrancyInvariantTest is Test {
         bool[] memory flags = new bool[](2); // both assets distributed as tokens
         _expectGuard();
         vm.prank(alice);
-        vault.redeem(sharesBefore, alice, alice, flags);
+        exitVault(vault, sharesBefore, alice, flags);
 
         assertEq(vault.balanceOf(alice), sharesBefore);
         assertEq(vault.totalSupply(), sharesBefore);
@@ -1238,13 +1289,13 @@ contract ReentrancyInvariantTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
         _expectGuard();
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
         assertEq(vault.totalSupply(), 0);
 
         routeA.disarm();
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         assertGt(vault.balanceOf(alice), 0);
     }
 
@@ -1349,7 +1400,7 @@ contract VaultFactoryInvariantTest is InvariantBase {
         uint256 count = factory.vaultCount();
         if (count == 0) return;
         EquiVault v = EquiVault(factory.vaults(count - 1));
-        assertEq(address(v.asset()), address(usdc));
+        assertEq(address(v.settlementAsset()), address(usdc));
         assertEq(address(v.registry()), address(registry));
         assertEq(v.manager(), manager);
         assertLe(v.feeBps(), 2_000);

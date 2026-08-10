@@ -32,7 +32,7 @@ library RebalanceLib {
     /// enough VaultFactory bytecode headroom under EIP-170.
     function isPaused(EquiVault vault) external view returns (bool) {
         AssetRegistry registry = vault.registry();
-        address settlement = vault.asset();
+        address settlement = address(vault.settlementAsset());
         address[] memory assets = vault.basketAssets();
         for (uint256 i = 0; i < assets.length; ++i) {
             address a = assets[i];
@@ -119,7 +119,7 @@ library RebalanceLib {
         address[] memory assets = vault.basketAssets();
         uint16[] memory weights = vault.basketWeightsBps();
         uint256 n = assets.length;
-        address settlement = vault.asset();
+        address settlement = address(vault.settlementAsset());
         uint256 pool = IERC20(settlement).balanceOf(address(vault));
         if (pool == 0) return 0;
 
@@ -174,13 +174,13 @@ library RebalanceLib {
     }
 
     function _priceOf(EquiVault vault, address a) private view returns (uint256) {
-        (uint256 price,) = vault.registry().getPrice(a, vault.asset());
+        (uint256 price,) = vault.registry().getPrice(a, address(vault.settlementAsset()));
         return price;
     }
 
     function _sell(EquiVault vault, address a, uint256 tokenAmount, uint256 minOut) private returns (uint256) {
         address route = vault.registry().assetConfig(a).liquidityRoute;
-        return ISwapRouter(route).swapExactIn(a, vault.asset(), tokenAmount, minOut);
+        return ISwapRouter(route).swapExactIn(a, address(vault.settlementAsset()), tokenAmount, minOut);
     }
 
     /// @dev Settlement quote for a token sell, discounted by the collective rebalance slippage bound.

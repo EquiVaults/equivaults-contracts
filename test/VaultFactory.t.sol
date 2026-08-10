@@ -118,7 +118,7 @@ contract VaultFactoryTest is Test {
         assertEq(v.capAum(), 500_000e6);
         assertEq(v.driftThresholdBps(), 500);
         assertEq(v.rebalanceSlippageBps(), 200);
-        assertEq(address(v.asset()), address(usdc));
+        assertEq(address(v.settlementAsset()), address(usdc));
         assertEq(address(v.registry()), address(registry));
         assertEq(v.basketAssets().length, 2);
         assertEq(v.basketWeightsBps()[0], 6_000);

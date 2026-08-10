@@ -9,6 +9,41 @@ import {RebalanceEngine} from "../src/RebalanceEngine.sol";
 
 import {MockOracle, MockOracleRoute, MockToken} from "./mocks/Mocks.sol";
 
+function enterVault(EquiVault vault, uint256 settlementIn, address receiver) returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: new uint256[](0),
+        deadline: type(uint256).max,
+        proposalId: 0
+    }));
+}
+
+function enterVaultWithMins(
+    EquiVault vault, uint256 settlementIn, address receiver, uint256[] memory minAmountsOut, uint256 proposalId
+) returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: minAmountsOut,
+        deadline: type(uint256).max,
+        proposalId: proposalId
+    }));
+}
+
+function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] memory sellTokens) returns (uint256) {
+    return vault.exit(EquiVault.ExitParams({
+        shares: shares,
+        receiver: receiver,
+        sellTokens: sellTokens,
+        minAmountsOut: new uint256[](0),
+        minSettlementOut: 0,
+        deadline: type(uint256).max
+    }));
+}
+
 /// @dev Rebalance engine (F002-S002): drift threshold, collective slippage, permissionless
 /// `rebalance()`, measured/capped gas reimbursement and the RebalanceEngine coordinator.
 contract RebalanceEngineTest is Test {
@@ -92,7 +127,7 @@ contract RebalanceEngineTest is Test {
         usdc.mint(alice, 1_000e6);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
 
         primaryA.setPrice(120e18, block.timestamp);
@@ -236,7 +271,7 @@ contract RebalanceEngineTest is Test {
         usdc.mint(alice, 1_000e6);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
 
         (uint256 maxDev, bool above) = vault.measureDrift();
@@ -414,7 +449,7 @@ contract RebalanceEngineTest is Test {
         usdc.mint(alice, 1_000e6);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
         primaryA.setPrice(125e18, block.timestamp);
         (uint256 maxDev,) = vault.measureDrift();
@@ -475,7 +510,7 @@ contract RebalanceEngineTest is Test {
         usdc.mint(alice, 1_000e6);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
         vm.stopPrank();
 
         (uint256 dev,) = vault.measureDrift();

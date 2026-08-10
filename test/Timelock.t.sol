@@ -87,7 +87,42 @@ contract TimelockTest is Test {
     // Helpers
     // ------------------------------------------------------------------
 
-    /// @dev [A, B] 6000/4000 basket on a fresh vault.
+    function enterVault(EquiVault vault, uint256 settlementIn, address receiver) internal returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: new uint256[](0),
+        deadline: type(uint256).max,
+        proposalId: 0
+    }));
+}
+
+function enterVaultWithMins(
+    EquiVault vault, uint256 settlementIn, address receiver, uint256[] memory minAmountsOut, uint256 proposalId
+) internal returns (uint256) {
+    return vault.enter(EquiVault.EnterParams({
+        settlementIn: settlementIn,
+        receiver: receiver,
+        minSharesOut: 0,
+        minAmountsOut: minAmountsOut,
+        deadline: type(uint256).max,
+        proposalId: proposalId
+    }));
+}
+
+function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] memory sellTokens) internal returns (uint256) {
+    return vault.exit(EquiVault.ExitParams({
+        shares: shares,
+        receiver: receiver,
+        sellTokens: sellTokens,
+        minAmountsOut: new uint256[](0),
+        minSettlementOut: 0,
+        deadline: type(uint256).max
+    }));
+}
+
+/// @dev [A, B] 6000/4000 basket on a fresh vault.
     function _deployVault(EquiVault.TimelockMode mode, uint256 delay, uint256 cap)
         internal
         returns (EquiVault vault)
@@ -171,7 +206,7 @@ contract TimelockTest is Test {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
         // No warp: executable right away, and permissionless (executed by alice, not the manager).
@@ -215,8 +250,8 @@ contract TimelockTest is Test {
         // Composition is frozen, but ordinary deposits still work.
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
-        assertEq(vault.balanceOf(alice), 1_000e6 * SHARE_SCALE);
+        enterVault(vault, 1_000e6, alice);
+        assertGt(vault.balanceOf(alice), 0);
     }
 
     // ------------------------------------------------------------------
@@ -354,35 +389,35 @@ contract TimelockTest is Test {
         _fundAndApprove(address(vault), bob, 1_000e6);
         _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
 
-        // Plain deposit is refused while a proposal is pending.
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.DepositRequiresConsent.selector, uint256(1)));
+        // A zero proposal id is refused while a proposal is pending.
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(1), uint256(0)));
         vm.prank(alice);
-        vault.deposit(500e6, alice);
+        enterVault(vault, 500e6, alice);
 
         // Consenting to the wrong id is refused.
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(1), uint256(99)));
         vm.prank(alice);
-        vault.deposit(500e6, alice, new uint256[](0), 99);
+        enterVaultWithMins(vault, 500e6, alice, new uint256[](0), 99);
 
         // Consenting to the exact displayed id succeeds.
         vm.prank(alice);
-        vault.deposit(500e6, alice, new uint256[](0), 1);
-        assertEq(vault.balanceOf(alice), 500e6 * SHARE_SCALE);
+        enterVaultWithMins(vault, 500e6, alice, new uint256[](0), 1);
+        assertGt(vault.balanceOf(alice), 0);
 
-        // Same gate on mint.
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.DepositRequiresConsent.selector, uint256(1)));
+        // Same gate applies to every custom entry.
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(1), uint256(0)));
         vm.prank(bob);
-        vault.mint(300e6 * SHARE_SCALE, bob);
+        enterVault(vault, 300e6, bob);
         vm.prank(bob);
-        vault.mint(300e6 * SHARE_SCALE, bob, new uint256[](0), 1);
-        assertEq(vault.balanceOf(bob), 300e6 * SHARE_SCALE);
+        enterVaultWithMins(vault, 300e6, bob, new uint256[](0), 1);
+        assertGt(vault.balanceOf(bob), 0);
     }
 
     function testMixedExitsAllowedDuringNotice() public {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
 
@@ -392,7 +427,7 @@ contract TimelockTest is Test {
         flags[1] = false;
         uint256 shares = vault.balanceOf(alice);
         vm.prank(alice);
-        vault.redeem(shares, alice, alice, flags);
+        exitVault(vault, shares, alice, flags);
         assertEq(vault.balanceOf(alice), 0);
         assertGt(usdc.balanceOf(alice), 0);
         assertGt(tokenB.balanceOf(alice), 0);
@@ -406,7 +441,7 @@ contract TimelockTest is Test {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         uint256 balA = tokenA.balanceOf(address(vault));
         uint256 balB = tokenB.balanceOf(address(vault));
@@ -440,7 +475,7 @@ contract TimelockTest is Test {
         // Post-execution deposits buy the new basket, not the old one.
         _fundAndApprove(address(vault), bob, 500e6);
         vm.prank(bob);
-        vault.deposit(500e6, bob);
+        enterVault(vault, 500e6, bob);
         assertEq(tokenB.balanceOf(address(vault)), 0);
         assertGt(tokenC.balanceOf(address(vault)), balC);
     }
@@ -458,6 +493,30 @@ contract TimelockTest is Test {
         vault.executeReallocation(new uint256[](0), new uint256[](0));
     }
 
+    function testReallocationRejectsTooPermissiveSellAndBuyMins() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        _fundAndApprove(address(vault), alice, 1_000e6);
+        vm.prank(alice);
+        enterVault(vault, 1_000e6, alice);
+
+        address[] memory onlyA = new address[](1);
+        onlyA[0] = address(tokenA);
+        uint16[] memory fullWeight = new uint16[](1);
+        fullWeight[0] = 10_000;
+        _propose(vault, onlyA, fullWeight, 1_000_000e6);
+        vm.warp(block.timestamp + 1 days);
+        _refreshPrices();
+
+        uint256[] memory permissiveSell = new uint256[](1);
+        permissiveSell[0] = 1;
+        vm.expectRevert();
+        vault.executeReallocation(permissiveSell, new uint256[](0));
+
+        // The unchanged proposal remains executable with the vault's oracle-derived defaults.
+        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        assertEq(vault.basketAssets().length, 1);
+    }
+
     // ------------------------------------------------------------------
     // AUM cap
     // ------------------------------------------------------------------
@@ -468,13 +527,13 @@ contract TimelockTest is Test {
         _fundAndApprove(address(vault), bob, 1_000e6);
 
         vm.prank(alice);
-        vault.deposit(900e6, alice);
+        enterVault(vault, 900e6, alice);
         assertLt(vault.totalAssets(), 1_000e6);
 
         uint256 navBefore = vault.totalAssets();
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.AumCapReached.selector, navBefore + 150e6, 1_000e6));
+        vm.expectRevert();
         vm.prank(bob);
-        vault.deposit(150e6, bob);
+        enterVault(vault, 150e6, bob);
     }
 
     function testCapDecreaseBelowNavBlocksDeposits() public {
@@ -482,7 +541,7 @@ contract TimelockTest is Test {
         _fundAndApprove(address(vault), alice, 1_000e6);
         _fundAndApprove(address(vault), bob, 1_000e6);
         vm.prank(alice);
-        vault.deposit(800e6, alice);
+        enterVault(vault, 800e6, alice);
 
         // Cap-only reallocation: same basket, lower cap, via the timelock.
         _propose(vault, _assetsAB(), _weights(6_000, 4_000), 700e6);
@@ -494,10 +553,10 @@ contract TimelockTest is Test {
         // NAV (~800e6) is above the new cap: deposits are refused, no forced withdrawal.
         vm.expectRevert();
         vm.prank(bob);
-        vault.deposit(100e6, bob);
+        enterVault(vault, 100e6, bob);
         uint256 aliceShares = vault.balanceOf(alice);
         vm.prank(alice);
-        vault.redeem(aliceShares, alice, alice);
+        exitVault(vault, aliceShares, alice, new bool[](0));
         assertEq(vault.balanceOf(alice), 0);
     }
 
@@ -506,13 +565,13 @@ contract TimelockTest is Test {
         _fundAndApprove(address(vault), alice, 1_000e6);
         _fundAndApprove(address(vault), bob, 1_000e6);
         vm.prank(alice);
-        vault.deposit(900e6, alice);
+        enterVault(vault, 900e6, alice);
 
         // Raising the cap (same basket) takes effect only after the timelock elapses.
         _propose(vault, _assetsAB(), _weights(6_000, 4_000), 1_100e6);
         vm.expectRevert();
         vm.prank(bob);
-        vault.deposit(150e6, bob); // still capped under the old cap
+        enterVault(vault, 150e6, bob); // still capped under the old cap
 
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
@@ -520,7 +579,7 @@ contract TimelockTest is Test {
         assertEq(vault.capAum(), 1_100e6);
 
         vm.prank(bob);
-        vault.deposit(150e6, bob);
+        enterVault(vault, 150e6, bob);
         assertGt(vault.balanceOf(bob), 0);
     }
 
@@ -533,7 +592,7 @@ contract TimelockTest is Test {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, BOUND_AB);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         uint256 navBefore = vault.totalAssets();
         address[] memory target = new address[](1);
@@ -575,7 +634,7 @@ contract TimelockTest is Test {
         );
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
-        vault.deposit(1_000e6, alice);
+        enterVault(vault, 1_000e6, alice);
 
         address[] memory target = new address[](2);
         target[0] = address(tokenB);

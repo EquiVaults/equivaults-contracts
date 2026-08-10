@@ -23,6 +23,7 @@ library MigrationLib {
 
     /// @dev Same signature as `EquiVault.MinOutsLengthMismatch` so reverts stay ABI-compatible.
     error MinOutsLengthMismatch(uint256 expected, uint256 actual);
+    error MigrationMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
 
     /// @dev Migrates the held basket toward the proposal target: sells removed assets entirely to
     /// the settlement asset, then reinvests the freed balance into the new basket by target-weight
@@ -59,8 +60,10 @@ library MigrationLib {
             address a = removed[i];
             uint256 balance = IERC20(a).balanceOf(address(vault));
             if (balance == 0) continue;
-            uint256 minOut = sellMinOuts.length != 0 ? sellMinOuts[i] : 0;
-            _sell(vault, a, balance, minOut == 0 ? _sellMinOut(vault, a, balance) : minOut);
+            uint256 defaultMin = _sellMinOut(vault, a, balance);
+            uint256 minOut = sellMinOuts.length != 0 && sellMinOuts[i] != 0 ? sellMinOuts[i] : defaultMin;
+            if (minOut < defaultMin) revert MigrationMinTooPermissive(i, minOut, defaultMin);
+            _sell(vault, a, balance, minOut);
         }
 
         // New-basket buy leg: reinvest the freed settlement toward the target weights by deficit
@@ -70,7 +73,7 @@ library MigrationLib {
             revert MinOutsLengthMismatch(newAssets.length, buyMinOuts.length);
         }
 
-        address settlement = vault.asset();
+        address settlement = address(vault.settlementAsset());
         // Approve the routes of assets that are not part of the current basket (kept assets were
         // approved at construction or by a previous migration).
         uint256 keptValue;
@@ -112,9 +115,11 @@ library MigrationLib {
             if (deficits[i] == 0) continue;
             uint256 alloc = settlementBalance.mulDiv(deficits[i], totalDeficit);
             if (alloc == 0) continue;
-            uint256 minOut = buyMinOuts.length != 0 ? buyMinOuts[i] : 0;
+            uint256 defaultMin = _buyMinOut(vault, newAssets[i], alloc);
+            uint256 minOut = buyMinOuts.length != 0 && buyMinOuts[i] != 0 ? buyMinOuts[i] : defaultMin;
+            if (minOut < defaultMin) revert MigrationMinTooPermissive(i, minOut, defaultMin);
             ISwapRouter(vault.registry().assetConfig(newAssets[i]).liquidityRoute).swapExactIn(
-                settlement, newAssets[i], alloc, minOut == 0 ? _buyMinOut(vault, newAssets[i], alloc) : minOut
+                settlement, newAssets[i], alloc, minOut
             );
         }
     }
@@ -125,7 +130,7 @@ library MigrationLib {
 
     function _sell(EquiVault vault, address a, uint256 tokenAmount, uint256 minOut) private returns (uint256) {
         address route = vault.registry().assetConfig(a).liquidityRoute;
-        return ISwapRouter(route).swapExactIn(a, vault.asset(), tokenAmount, minOut);
+        return ISwapRouter(route).swapExactIn(a, address(vault.settlementAsset()), tokenAmount, minOut);
     }
 
     /// @dev Settlement quote for a token sell, discounted by the vault default slippage bound.
@@ -153,7 +158,7 @@ library MigrationLib {
     }
 
     function _priceOf(EquiVault vault, address a) private view returns (uint256) {
-        (uint256 price,) = vault.registry().getPrice(a, vault.asset());
+        (uint256 price,) = vault.registry().getPrice(a, address(vault.settlementAsset()));
         return price;
     }
 }

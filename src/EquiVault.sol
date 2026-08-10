@@ -3,7 +3,6 @@ pragma solidity 0.8.30;
 
 import {IERC20, IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -15,8 +14,8 @@ import {MigrationLib} from "./MigrationLib.sol";
 import {RebalanceLib} from "./RebalanceLib.sol";
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
-/// @notice Stablecoin-settled ERC-4626 vault holding a basket of registered assets, with a
-/// configurable trust mode and a reallocation proposal mechanism.
+/// @notice Stablecoin-settled basket vault holding registered assets, with a configurable trust
+/// mode and a reallocation proposal mechanism.
 /// @dev Deposits buy the basket immediately through each asset's liquidity route; redemptions
 /// withdraw the exact proportional share of every asset and let the user pick, per asset, between
 /// receiving the token and selling it to the settlement asset. Shares are non-transferable. A performance fee on
@@ -25,10 +24,10 @@ import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 /// The trust mode (instant, delayed 1-7 days, or immutable) is chosen at creation and frozen: it
 /// gates single reallocation proposals that change the basket assets/weights and the AUM cap
 /// (`capAum`, bounded by the registry exposure caps), executed by anyone after the delay with the
-/// positions migrated through the registered liquidity routes. The OpenZeppelin inflation-attack
-/// mitigation (virtual shares/assets via `_decimalsOffset`, set to 6 for a stronger virtual-share
-/// buffer) is preserved.
-contract EquiVault is ERC4626, ReentrancyGuard {
+/// positions migrated through the registered liquidity routes. The vault intentionally does not
+/// implement ERC-4626: entries and exits perform several swaps and therefore require explicit
+/// execution constraints rather than ERC-4626's single-asset preview semantics.
+contract EquiVault is ERC20, ReentrancyGuard {
     using Math for uint256;
     using SafeERC20 for IERC20;
 
@@ -40,6 +39,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     uint256 public constant MIN_TIMELOCK_DELAY = 1 days;
     uint256 public constant MAX_TIMELOCK_DELAY = 7 days;
     uint16 public constant MANAGER_FEE_SHARE_BPS = 9_000; // 90 %
+    uint256 public constant VIRTUAL_SHARES = 1e6;
+    uint256 public constant VIRTUAL_ASSETS = 1;
 
     // Rebalance parameters. The drift threshold (1-10 points, default 3) gates when the basket is
     // rebalanceable; the collective slippage (0.1-3 %, default 1 %) bounds every rebalance swap.
@@ -84,12 +85,33 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint256[] minAmountsOut; // per basket asset; 0 = vault default bound, any value below the default reverts
     }
 
+    /// @notice Explicit execution constraints for a basket entry.
+    struct EnterParams {
+        uint256 settlementIn;
+        address receiver;
+        uint256 minSharesOut;
+        uint256[] minAmountsOut;
+        uint256 deadline;
+        uint256 proposalId;
+    }
+
+    /// @notice Explicit execution constraints for a proportional basket exit.
+    struct ExitParams {
+        uint256 shares;
+        address receiver;
+        bool[] sellTokens;
+        uint256[] minAmountsOut;
+        uint256 minSettlementOut;
+        uint256 deadline;
+    }
+
     address public immutable manager;
     uint16 public immutable feeBps;
     uint16 public immutable maxSlippageBps;
     TimelockMode public immutable timelockMode;
     uint256 public immutable timelockDelay;
     AssetRegistry public immutable registry;
+    IERC20 public immutable settlementAsset;
     uint8 private immutable _settlementDecimals;
 
     address[] private _basketAssets;
@@ -139,13 +161,27 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     error NoActiveProposal();
     error ProposalNotExecutable(uint256 executableAt);
     error ProposalIdMismatch(uint256 activeId, uint256 proposalId);
-    error DepositRequiresConsent(uint256 proposalId);
     error AssetNotAdmissible(address asset);
     error InvalidDriftThreshold(uint16 driftBps);
     error InvalidRebalanceSlippage(uint16 slippageBps);
     error DriftBelowThreshold(uint256 maxDeviationBps, uint16 thresholdBps);
     error DeadlineExpired(uint256 timestamp);
     error RebalanceMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
+    error EntrySharesBelowMinimum(uint256 actualShares, uint256 minSharesOut);
+    error ExitSettlementBelowMinimum(uint256 actualSettlement, uint256 minSettlementOut);
+    error InsufficientShares(address owner, uint256 available, uint256 required);
+    error ExitMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
+    error MigrationMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
+
+    /// @notice Emitted after settlement is swapped into the basket and shares are minted from the
+    /// basket value actually received, never from a pre-swap estimate.
+    event Entered(
+        address indexed caller, address indexed receiver, uint256 settlementIn, uint256 valueReceived, uint256 shares
+    );
+
+    /// @notice Emitted after a holder exits. `settlementOut` is the actual settlement transferred
+    /// to the receiver; token transfers are emitted by their ERC-20 contracts.
+    event Exited(address indexed owner, address indexed receiver, uint256 shares, uint256 settlementOut, uint256 feePot);
 
     event PerformanceFeeCollected(
         address indexed manager,
@@ -188,7 +224,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     );
 
     constructor(
-        IERC20 settlementAsset,
+        IERC20 settlementAsset_,
         AssetRegistry registry_,
         address manager_,
         address[] memory assets,
@@ -200,11 +236,12 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         uint256 capAum_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
-    ) ERC4626(settlementAsset) ERC20("EquiVault", "EQV") {
+    ) ERC20("EquiVault", "EQV") {
         // `timelockMode_` cannot be out of range: Solidity bounds-checks enum values on conversion
         // and on ABI decoding, so an invalid mode is rejected with Panic(0x21) before this code.
-        _initBasket(settlementAsset, registry_, assets, weightsBps);
+        _initBasket(settlementAsset_, registry_, assets, weightsBps);
 
+        settlementAsset = settlementAsset_;
         manager = manager_;
         registry = registry_;
         feeBps = feeBps_;
@@ -216,8 +253,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         // convention (dollars per whole token at 1e18), so the settlement wei value needs
         // rescaling. Must be set before `_maxVaultAumBound`, which converts the registry ceiling
         // to these units.
-        (bool ok, uint8 settlementDecimals) = SafeERC20.tryGetDecimals(settlementAsset);
-        _settlementDecimals = ok ? settlementDecimals : 18;
+        (bool ok, uint8 tokenDecimals) = SafeERC20.tryGetDecimals(settlementAsset_);
+        _settlementDecimals = ok ? tokenDecimals : 18;
 
         // AUM cap in settlement-asset units, bounded by the registry-derived exposure ceiling.
         uint256 aumBound = _maxVaultAumBound(assets, weightsBps);
@@ -235,15 +272,13 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------
-    // ERC-4626 overrides
+    // Custom basket entry / exit API
     // ---------------------------------------------------------------------
 
     /// @notice NAV of the vault expressed in settlement units: each basket asset valued at its live
-    /// registry price (primary oracle, then fallback). The settlement balance is deliberately
-    /// excluded: exits distribute only the basket, so counting uninvested settlement would break
-    /// the link between
-    /// share price and redemption value (e.g. under a donation attack).
-    function totalAssets() public view override returns (uint256) {
+    /// registry price (primary oracle, then fallback). Settlement dust is excluded because it is
+    /// not part of the basket distributed by `exit`.
+    function totalAssets() public view returns (uint256) {
         uint256 nav;
         uint256 n = _basketAssets.length;
         for (uint256 i = 0; i < n; ++i) {
@@ -253,122 +288,78 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         return nav;
     }
 
-    /// @dev Stronger inflation-attack mitigation: virtual shares/assets scale with `10 ** _decimalsOffset()`
-    /// (OpenZeppelin mechanism, offset 6 as in the historical v4.9 default). Keeps the vault usable for
-    /// later depositors even after a deliberate donation.
-    function _decimalsOffset() internal pure override returns (uint8) {
-        return 6;
+    /// @notice Oracle-valued proportional basket slice for UI display only; it is not an execution guarantee.
+    function quoteExitValue(uint256 shares) external view returns (uint256 value) {
+        uint256 supply = totalSupply();
+        if (shares == 0 || shares > supply) return 0;
+        (, value) = ExitLib.computeExitAmounts(this, shares, supply);
     }
 
-    function deposit(uint256 assets, address receiver) public override nonReentrant returns (uint256 shares) {
+    /// @notice Swaps settlement into the basket and mints shares from the value actually received.
+    /// @dev `minAmountsOut` is in basket order; an empty array applies the immutable vault default.
+    /// `proposalId` is zero with no pending reallocation, otherwise it must equal the active id.
+    function enter(EnterParams calldata params) external nonReentrant returns (uint256 shares) {
+        if (params.deadline < block.timestamp) revert DeadlineExpired(block.timestamp);
         _requireCanDeposit();
-        _requireNoActiveProposal();
-        _requireAumCapacity(assets);
-        shares = previewDeposit(assets);
-        _enter(_msgSender(), receiver, assets, shares, new uint256[](0));
+        _requireEntryConsent(params.proposalId);
+
+        uint256 supplyBefore = totalSupply();
+        uint256 navBefore = totalAssets();
+        _transferIn(_msgSender(), params.settlementIn);
+        uint256 valueReceived = _buyBasket(params.settlementIn, params.minAmountsOut);
+        uint256 navAfter = navBefore + valueReceived;
+        if (navAfter > capAum) revert AumCapReached(navAfter, capAum);
+
+        shares = valueReceived.mulDiv(supplyBefore + VIRTUAL_SHARES, navBefore + VIRTUAL_ASSETS);
+        if (shares == 0 || shares < params.minSharesOut) {
+            revert EntrySharesBelowMinimum(shares, params.minSharesOut);
+        }
+        costBasis[params.receiver] += params.settlementIn;
+        _mint(params.receiver, shares);
+        emit Entered(_msgSender(), params.receiver, params.settlementIn, valueReceived, shares);
     }
 
-    /// @dev `minAmountsOut` applies per basket asset in order; 0 falls back to the vault default bound.
-    function deposit(uint256 assets, address receiver, uint256[] calldata minAmountsOut)
-        external
-        nonReentrant
-        returns (uint256 shares)
-    {
-        _requireCanDeposit();
-        _requireNoActiveProposal();
-        _requireAumCapacity(assets);
-        shares = previewDeposit(assets);
-        _enter(_msgSender(), receiver, assets, shares, minAmountsOut);
-    }
-
-    /// @dev Same as the `minAmountsOut` overload, but while a reallocation proposal is pending the
-    /// caller must consent to the exact displayed proposal id.
-    function deposit(uint256 assets, address receiver, uint256[] calldata minAmountsOut, uint256 proposalId)
-        external
-        nonReentrant
-        returns (uint256 shares)
-    {
-        _requireCanDeposit();
-        _requireProposalConsent(proposalId);
-        _requireAumCapacity(assets);
-        shares = previewDeposit(assets);
-        _enter(_msgSender(), receiver, assets, shares, minAmountsOut);
-    }
-
-    function mint(uint256 shares, address receiver) public override nonReentrant returns (uint256 assets) {
-        _requireCanDeposit();
-        _requireNoActiveProposal();
-        assets = previewMint(shares);
-        _requireAumCapacity(assets);
-        _enter(_msgSender(), receiver, assets, shares, new uint256[](0));
-    }
-
-    /// @dev `minAmountsOut` applies per basket asset in order; 0 falls back to the vault default bound.
-    function mint(uint256 shares, address receiver, uint256[] calldata minAmountsOut)
-        external
-        nonReentrant
-        returns (uint256 assets)
-    {
-        _requireCanDeposit();
-        _requireNoActiveProposal();
-        assets = previewMint(shares);
-        _requireAumCapacity(assets);
-        _enter(_msgSender(), receiver, assets, shares, minAmountsOut);
-    }
-
-    /// @dev Same as the `minAmountsOut` overload, but consenting to the pending proposal id.
-    function mint(uint256 shares, address receiver, uint256[] calldata minAmountsOut, uint256 proposalId)
-        external
-        nonReentrant
-        returns (uint256 assets)
-    {
-        _requireCanDeposit();
-        _requireProposalConsent(proposalId);
-        assets = previewMint(shares);
-        _requireAumCapacity(assets);
-        _enter(_msgSender(), receiver, assets, shares, minAmountsOut);
-    }
-
-    function withdraw(uint256 assets, address receiver, address owner)
-        public
-        override
-        nonReentrant
-        returns (uint256 shares)
-    {
+    /// @notice Burns caller shares and distributes their proportional basket slice.
+    /// @dev For a sold asset, a caller-provided min-out can only tighten the vault default;
+    /// `minSettlementOut` protects the aggregate settlement transferred to the receiver.
+    function exit(ExitParams calldata params) external nonReentrant returns (uint256 settlementOut) {
+        if (params.deadline < block.timestamp) revert DeadlineExpired(block.timestamp);
         _requireCanExit();
-        shares = previewWithdraw(assets);
-        _exit(_msgSender(), receiver, owner, shares, new bool[](0));
-    }
 
-    /// @dev `sellTokens[i]` = true sells asset i to the settlement asset, false transfers the
-    /// token to `receiver`.
-    function withdraw(uint256 assets, address receiver, address owner, bool[] calldata sellTokens)
-        external
-        nonReentrant
-        returns (uint256 shares)
-    {
-        _requireCanExit();
-        shares = previewWithdraw(assets);
-        _exit(_msgSender(), receiver, owner, shares, sellTokens);
-    }
+        address owner = _msgSender();
+        uint256 sharesBefore = balanceOf(owner);
+        if (params.shares == 0 || params.shares > sharesBefore) {
+            revert InsufficientShares(owner, sharesBefore, params.shares);
+        }
+        uint256 totalShares = totalSupply();
+        uint256 n = _basketAssets.length;
+        if (params.sellTokens.length != 0 && params.sellTokens.length != n) {
+            revert SellFlagsLengthMismatch(n, params.sellTokens.length);
+        }
+        if (params.minAmountsOut.length != 0 && params.minAmountsOut.length != n) {
+            revert MinOutsLengthMismatch(n, params.minAmountsOut.length);
+        }
+        bool explicitFlags = params.sellTokens.length != 0;
 
-    function redeem(uint256 shares, address receiver, address owner)
-        public
-        override
-        nonReentrant
-        returns (uint256 assets)
-    {
-        assets = _exit(_msgSender(), receiver, owner, shares, new bool[](0));
-    }
+        (uint256[] memory amounts, uint256 valueWithdrawn) =
+            ExitLib.computeExitAmounts(this, params.shares, totalShares);
+        uint256 realizedCost = costBasis[owner].mulDiv(params.shares, sharesBefore);
+        costBasis[owner] -= realizedCost;
+        uint256 fee;
+        if (valueWithdrawn > realizedCost) {
+            fee = (valueWithdrawn - realizedCost).mulDiv(feeBps, BPS_DENOMINATOR);
+        }
 
-    /// @dev `sellTokens[i]` = true sells asset i to the settlement asset, false transfers the
-    /// token to `receiver`.
-    function redeem(uint256 shares, address receiver, address owner, bool[] calldata sellTokens)
-        external
-        nonReentrant
-        returns (uint256 assets)
-    {
-        assets = _exit(_msgSender(), receiver, owner, shares, sellTokens);
+        _burn(owner, params.shares);
+        (uint256 feePot, uint256 actualSettlementOut) = ExitLib.distribute(
+            this, params.receiver, amounts, params.sellTokens, explicitFlags, params.minAmountsOut, fee, valueWithdrawn
+        );
+        if (actualSettlementOut < params.minSettlementOut) {
+            revert ExitSettlementBelowMinimum(actualSettlementOut, params.minSettlementOut);
+        }
+        _settleFee(feePot);
+        emit Exited(owner, params.receiver, params.shares, actualSettlementOut, feePot);
+        return actualSettlementOut;
     }
 
     // ---------------------------------------------------------------------
@@ -391,6 +382,11 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     /// `RebalanceLib` to rescale Chainlink-style prices into settlement units.
     function settlementDecimals() external view returns (uint8) {
         return _settlementDecimals;
+    }
+
+    /// @notice Shares use the settlement decimals plus the six-decimal virtual-share buffer.
+    function decimals() public view override returns (uint8) {
+        return _settlementDecimals + 6;
     }
 
     function basketWeightsBps() external view returns (uint16[] memory) {
@@ -562,7 +558,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         // can neither inflate it nor receive anything without a valid rebalance. Paid between the
         // sell and buy legs so the pool holds the settlement just received from sells.
         uint256 gasRebate = RebalanceLib.computeRebate(startGas - gasleft());
-        IERC20 settlement = IERC20(asset());
+        IERC20 settlement = settlementAsset;
         uint256 pool = settlement.balanceOf(address(this));
         if (gasRebate > pool) gasRebate = pool;
         if (gasRebate > 0) settlement.safeTransfer(_msgSender(), gasRebate);
@@ -578,58 +574,8 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     // Internal
     // ---------------------------------------------------------------------
 
-    function _enter(
-        address caller,
-        address receiver,
-        uint256 assets,
-        uint256 shares,
-        uint256[] memory minAmountsOut
-    ) internal {
-        _requireCanDeposit();
-        _transferIn(caller, assets);
-        _buyBasket(assets, minAmountsOut);
-        costBasis[receiver] += assets;
-        _mint(receiver, shares);
-        emit Deposit(caller, receiver, assets, shares);
-    }
-
-    /// @dev Sells the proportional share of every basket asset, charges the performance fee on
-    /// realized gain, then distributes per-asset token or settlement proceeds to `receiver`.
-    function _exit(address caller, address receiver, address owner, uint256 shares, bool[] memory sellTokens)
-        internal
-        returns (uint256 assetsOut)
-    {
-        if (caller != owner) {
-            _spendAllowance(owner, caller, shares);
-        }
-        uint256 sharesBefore = balanceOf(owner);
-        if (shares > sharesBefore) revert ERC4626ExceededMaxRedeem(owner, shares, sharesBefore);
-        _requireCanExit();
-
-        uint256 totalShares = totalSupply();
-        uint256 n = _basketAssets.length;
-        if (sellTokens.length != 0 && sellTokens.length != n) revert SellFlagsLengthMismatch(n, sellTokens.length);
-        bool explicitFlags = sellTokens.length != 0;
-
-        // Exact proportional share of each asset, valued at live prices. The per-asset amounts and
-        // the distribution (swaps and transfers) run in ExitLib to keep this runtime under the
-        // EIP-170 code-size limit; the vault keeps the storage writes (cost basis, share burn).
-        (uint256[] memory amounts, uint256 valueWithdrawn) = ExitLib.computeExitAmounts(this, shares, totalShares);
-
-        // Realized gain on the withdrawn fraction; fee only on positive gain.
-        uint256 realizedCost = costBasis[owner].mulDiv(shares, sharesBefore);
-        costBasis[owner] -= realizedCost;
-        uint256 fee;
-        if (valueWithdrawn > realizedCost) {
-            fee = (valueWithdrawn - realizedCost).mulDiv(feeBps, BPS_DENOMINATOR);
-        }
-
-        _burn(owner, shares);
-
-        _settleFee(ExitLib.distribute(this, receiver, amounts, sellTokens, explicitFlags, fee, valueWithdrawn));
-
-        emit Withdraw(caller, receiver, owner, valueWithdrawn, shares);
-        return valueWithdrawn;
+    function _transferIn(address caller, uint256 amount) internal {
+        settlementAsset.safeTransferFrom(caller, address(this), amount);
     }
 
     /// @dev Splits the collected fee pot 90 % (manager) / 10 % (treasury) and transfers it.
@@ -638,13 +584,16 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             uint256 managerShare = feePot.mulDiv(MANAGER_FEE_SHARE_BPS, BPS_DENOMINATOR);
             uint256 treasuryShare = feePot - managerShare;
             address treasury = registry.treasury();
-            IERC20(asset()).safeTransfer(manager, managerShare);
-            IERC20(asset()).safeTransfer(treasury, treasuryShare);
+            settlementAsset.safeTransfer(manager, managerShare);
+            settlementAsset.safeTransfer(treasury, treasuryShare);
             emit PerformanceFeeCollected(manager, treasury, feePot, managerShare, treasuryShare);
         }
     }
 
-    function _buyBasket(uint256 assets, uint256[] memory minAmountsOut) internal {
+    /// @dev Buys the basket and returns the oracle value of tokens actually received. The
+    /// pre/post balance delta, rather than a route-reported amount or input settlement, is what
+    /// protects existing shareholders from an underperforming route (B003).
+    function _buyBasket(uint256 assets, uint256[] memory minAmountsOut) internal returns (uint256 valueReceived) {
         uint256 n = _basketAssets.length;
         if (minAmountsOut.length != 0 && minAmountsOut.length != n) {
             revert MinOutsLengthMismatch(n, minAmountsOut.length);
@@ -654,7 +603,9 @@ contract EquiVault is ERC4626, ReentrancyGuard {
             address a = _basketAssets[i];
             uint256 alloc = assets.mulDiv(_basketWeightsBps[i], BPS_DENOMINATOR);
             uint256 minOut = explicitMins ? minAmountsOut[i] : _buyMinOut(a, alloc);
-            ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(asset(), a, alloc, minOut);
+            uint256 balanceBefore = IERC20(a).balanceOf(address(this));
+            ISwapRouter(registry.assetConfig(a).liquidityRoute).swapExactIn(address(settlementAsset), a, alloc, minOut);
+            valueReceived += _valueSettlement(a, IERC20(a).balanceOf(address(this)) - balanceBefore);
         }
     }
 
@@ -681,33 +632,25 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     }
 
     function _priceOf(address a) internal view returns (uint256) {
-        (uint256 price,) = registry.getPrice(a, asset());
+        (uint256 price,) = registry.getPrice(a, address(settlementAsset));
         return price;
     }
 
     function _isPriced(address a) internal view returns (bool) {
-        try registry.getPrice(a, asset()) returns (uint256 price, uint256) {
+        try registry.getPrice(a, address(settlementAsset)) returns (uint256 price, uint256) {
             return price != 0;
         } catch {
             return false;
         }
     }
 
-    function _requireNoActiveProposal() internal view {
-        if (_activeProposal.id != 0) revert DepositRequiresConsent(_activeProposal.id);
-    }
-
-    function _requireProposalConsent(uint256 proposalId) internal view {
+    function _requireEntryConsent(uint256 proposalId) internal view {
         uint256 activeId = _activeProposal.id;
-        if (activeId == 0) revert NoActiveProposal();
+        if (activeId == 0) {
+            if (proposalId != 0) revert NoActiveProposal();
+            return;
+        }
         if (proposalId != activeId) revert ProposalIdMismatch(activeId, proposalId);
-    }
-
-    /// @dev Refuses deposits that would push the vault NAV above `capAum`; a cap below the current
-    /// NAV therefore blocks all new deposits (without forcing withdrawals) until redemptions lower it.
-    function _requireAumCapacity(uint256 assets) internal view {
-        uint256 navAfter = totalAssets() + assets;
-        if (navAfter > capAum) revert AumCapReached(navAfter, capAum);
     }
 
     function _requireCanDeposit() internal view {
@@ -781,7 +724,7 @@ contract EquiVault is ERC4626, ReentrancyGuard {
         for (uint256 i = 0; i < n; ++i) {
             address a = assets_[i];
             if (a == address(0)) revert InvalidAddress();
-            if (a == address(asset())) revert SettlementAssetInBasket(a);
+            if (a == address(settlementAsset)) revert SettlementAssetInBasket(a);
             for (uint256 j = 0; j < i; ++j) {
                 if (assets_[j] == a) revert DuplicateAsset(a);
             }
@@ -846,11 +789,11 @@ contract EquiVault is ERC4626, ReentrancyGuard {
     // Non-transferable shares
     // ---------------------------------------------------------------------
 
-    function transfer(address, uint256) public pure override(ERC20, IERC20) returns (bool) {
+    function transfer(address, uint256) public pure override(ERC20) returns (bool) {
         revert SharesNonTransferable();
     }
 
-    function transferFrom(address, address, uint256) public pure override(ERC20, IERC20) returns (bool) {
+    function transferFrom(address, address, uint256) public pure override(ERC20) returns (bool) {
         revert SharesNonTransferable();
     }
 }
