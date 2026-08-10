@@ -517,6 +517,21 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertEq(vault.basketAssets().length, 1);
     }
 
+    function testReallocationRejectsTooPermissiveBuyMin() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        _fundAndApprove(address(vault), alice, 1_000e6);
+        vm.prank(alice);
+        enterVault(vault, 1_000e6, alice);
+
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_000_000e6);
+        vm.warp(block.timestamp + 1 days);
+        _refreshPrices();
+        uint256[] memory permissiveBuy = new uint256[](2);
+        permissiveBuy[1] = 1; // C is newly bought and its oracle minimum is materially higher.
+        vm.expectRevert();
+        vault.executeReallocation(new uint256[](0), permissiveBuy);
+    }
+
     // ------------------------------------------------------------------
     // AUM cap
     // ------------------------------------------------------------------
