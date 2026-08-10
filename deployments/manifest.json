@@ -1,13 +1,12 @@
 {
   "schema": "equivaults-integration-artifacts/v1",
-  "contractsCommit": "717f7adafdb43d09074ad88a533b17608ea87478",
-  "generatedAt": "2026-08-09",
+  "contractsCommit": "9b11ae4920f752f8594dec8b0e686e44d5948392",
+  "generatedAt": "2026-08-10",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",
     "EquiVault.json",
     "IERC20.json",
-    "IERC4626.json",
     "IPriceOracle.json",
     "ISwapRouter.json",
     "RebalanceEngine.json",

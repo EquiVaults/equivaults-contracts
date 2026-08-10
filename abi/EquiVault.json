@@ -3,7 +3,7 @@
     "type": "constructor",
     "inputs": [
       {
-        "name": "settlementAsset",
+        "name": "settlementAsset_",
         "type": "address",
         "internalType": "contract IERC20"
       },
@@ -275,6 +275,32 @@
   },
   {
     "type": "function",
+    "name": "VIRTUAL_ASSETS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "VIRTUAL_SHARES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "activeParameterProposal",
     "inputs": [],
     "outputs": [
@@ -398,19 +424,6 @@
   },
   {
     "type": "function",
-    "name": "asset",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "balanceOf",
     "inputs": [
       {
@@ -483,44 +496,6 @@
   },
   {
     "type": "function",
-    "name": "convertToAssets",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "convertToShares",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "costBasis",
     "inputs": [
       {
@@ -553,93 +528,6 @@
   },
   {
     "type": "function",
-    "name": "deposit",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "deposit",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "minAmountsOut",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "deposit",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "minAmountsOut",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      },
-      {
-        "name": "proposalId",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "driftThresholdBps",
     "inputs": [],
     "outputs": [
@@ -650,6 +538,57 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "enter",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct EquiVault.EnterParams",
+        "components": [
+          {
+            "name": "settlementIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "receiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minSharesOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "minAmountsOut",
+            "type": "uint256[]",
+            "internalType": "uint256[]"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "proposalId",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -674,6 +613,57 @@
       }
     ],
     "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "exit",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct EquiVault.ExitParams",
+        "components": [
+          {
+            "name": "shares",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "receiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "sellTokens",
+            "type": "bool[]",
+            "internalType": "bool[]"
+          },
+          {
+            "name": "minAmountsOut",
+            "type": "uint256[]",
+            "internalType": "uint256[]"
+          },
+          {
+            "name": "minSettlementOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "settlementOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -704,63 +694,6 @@
   },
   {
     "type": "function",
-    "name": "maxDeposit",
-    "inputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "maxMint",
-    "inputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "maxRedeem",
-    "inputs": [
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "maxSlippageBps",
     "inputs": [],
     "outputs": [
@@ -768,25 +701,6 @@
         "name": "",
         "type": "uint16",
         "internalType": "uint16"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "maxWithdraw",
-    "inputs": [
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -811,93 +725,6 @@
   },
   {
     "type": "function",
-    "name": "mint",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "mint",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "minAmountsOut",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "mint",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "minAmountsOut",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      },
-      {
-        "name": "proposalId",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "name",
     "inputs": [],
     "outputs": [
@@ -918,82 +745,6 @@
         "name": "",
         "type": "bool",
         "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "previewDeposit",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "previewMint",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "previewRedeem",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "previewWithdraw",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -1054,6 +805,25 @@
   },
   {
     "type": "function",
+    "name": "quoteExitValue",
+    "inputs": [
+      {
+        "name": "shares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "rebalance",
     "inputs": [
       {
@@ -1098,69 +868,6 @@
   },
   {
     "type": "function",
-    "name": "redeem",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "sellTokens",
-        "type": "bool[]",
-        "internalType": "bool[]"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "redeem",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "registry",
     "inputs": [],
     "outputs": [
@@ -1168,6 +875,19 @@
         "name": "",
         "type": "address",
         "internalType": "contract AssetRegistry"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "settlementAsset",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IERC20"
       }
     ],
     "stateMutability": "view"
@@ -1304,69 +1024,6 @@
     "stateMutability": "pure"
   },
   {
-    "type": "function",
-    "name": "withdraw",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "withdraw",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "sellTokens",
-        "type": "bool[]",
-        "internalType": "bool[]"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
     "type": "event",
     "name": "Approval",
     "inputs": [
@@ -1393,14 +1050,45 @@
   },
   {
     "type": "event",
-    "name": "Deposit",
+    "name": "Entered",
     "inputs": [
       {
-        "name": "sender",
+        "name": "caller",
         "type": "address",
         "indexed": true,
         "internalType": "address"
       },
+      {
+        "name": "receiver",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "settlementIn",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "valueReceived",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "shares",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Exited",
+    "inputs": [
       {
         "name": "owner",
         "type": "address",
@@ -1408,13 +1096,25 @@
         "internalType": "address"
       },
       {
-        "name": "assets",
+        "name": "receiver",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "shares",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
       },
       {
-        "name": "shares",
+        "name": "settlementOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "feePot",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1684,43 +1384,6 @@
     "anonymous": false
   },
   {
-    "type": "event",
-    "name": "Withdraw",
-    "inputs": [
-      {
-        "name": "sender",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "assets",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "shares",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
     "type": "error",
     "name": "AssetNotAdmissible",
     "inputs": [
@@ -1780,17 +1443,6 @@
     "inputs": [
       {
         "name": "timestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "DepositRequiresConsent",
-    "inputs": [
-      {
-        "name": "proposalId",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1911,20 +1563,15 @@
   },
   {
     "type": "error",
-    "name": "ERC4626ExceededMaxDeposit",
+    "name": "EntrySharesBelowMinimum",
     "inputs": [
       {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "assets",
+        "name": "actualShares",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "max",
+        "name": "minSharesOut",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1932,20 +1579,20 @@
   },
   {
     "type": "error",
-    "name": "ERC4626ExceededMaxMint",
+    "name": "ExitMinTooPermissive",
     "inputs": [
       {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "shares",
+        "name": "index",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "max",
+        "name": "minOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "defaultMinOut",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1953,7 +1600,23 @@
   },
   {
     "type": "error",
-    "name": "ERC4626ExceededMaxRedeem",
+    "name": "ExitSettlementBelowMinimum",
+    "inputs": [
+      {
+        "name": "actualSettlement",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minSettlementOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InsufficientShares",
     "inputs": [
       {
         "name": "owner",
@@ -1961,33 +1624,12 @@
         "internalType": "address"
       },
       {
-        "name": "shares",
+        "name": "available",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "max",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "ERC4626ExceededMaxWithdraw",
-    "inputs": [
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "max",
+        "name": "required",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -2088,6 +1730,27 @@
         "name": "weightBps",
         "type": "uint16",
         "internalType": "uint16"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "MigrationMinTooPermissive",
+    "inputs": [
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "defaultMinOut",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
