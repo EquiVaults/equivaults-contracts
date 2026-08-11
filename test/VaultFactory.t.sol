@@ -216,6 +216,12 @@ contract VaultFactoryTest is Test {
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidFee.selector, uint16(2_001)));
         factory.createVault(manager, a, w, 2_001, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
 
+        // vault slippage must leave room for the 0.1 % minimum rebalance slippage.
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(0)));
+        factory.createVault(manager, a, w, 1_000, 0, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(9)));
+        factory.createVault(manager, a, w, 1_000, 9, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+
         // vault slippage above the 30 % cap
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(3_001)));
         factory.createVault(manager, a, w, 1_000, 3_001, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);

@@ -59,7 +59,7 @@ contract VaultFactory {
     /// @param assets_ 1-5 registered and currently admitted basket assets.
     /// @param weightsBps_ Target weights, each >= 5 % and summing exactly to 100 %.
     /// @param feeBps_ Immutable performance fee on realized gain (0-20 %).
-    /// @param maxSlippageBps_ Immutable max swap slippage bound (0-30 %).
+    /// @param maxSlippageBps_ Immutable max swap slippage bound (0.1-30 %).
     /// @param timelockMode_ Instant / Delayed (1-7 days) / Immutable, frozen forever.
     /// @param timelockDelay_ Delay used by Delayed mode, otherwise must be 0.
     /// @param capAum_ AUM cap in settlement units, bounded by the registry exposure ceilings.

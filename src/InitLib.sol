@@ -15,6 +15,9 @@ library InitLib {
     // is not resolved because of the EquiVault <-> InitLib import cycle). The vault bounds tests
     // cover these values.
     uint16 private constant MAX_FEE_BPS = 2_000; // 20 %
+    // The immutable vault swap ceiling must accommodate the 0.1 % minimum rebalance bound.
+    // Allowing less would create a vault with an unmodifiable invalid rebalance configuration.
+    uint16 private constant MIN_MAX_SLIPPAGE_BPS = 10; // 0.1 %
     uint16 private constant MAX_SLIPPAGE_BPS = 3_000; // 30 %
     uint256 private constant MIN_TIMELOCK_DELAY = 1 days;
     uint256 private constant MAX_TIMELOCK_DELAY = 7 days;
@@ -50,7 +53,9 @@ library InitLib {
         if (manager_ == address(0)) revert InvalidAddress();
         if (address(registry_) == address(0)) revert InvalidAddress();
         if (feeBps_ > MAX_FEE_BPS) revert InvalidFee(feeBps_);
-        if (maxSlippageBps_ > MAX_SLIPPAGE_BPS) revert InvalidSlippage(maxSlippageBps_);
+        if (maxSlippageBps_ < MIN_MAX_SLIPPAGE_BPS || maxSlippageBps_ > MAX_SLIPPAGE_BPS) {
+            revert InvalidSlippage(maxSlippageBps_);
+        }
         // `timelockMode_` cannot be out of range: Solidity bounds-checks enum values on conversion
         // and on ABI decoding, so an invalid mode is rejected with Panic(0x21) before this code.
         if (timelockMode_ == EquiVault.TimelockMode.Delayed) {
