@@ -17,7 +17,7 @@ import {MockOracle, MockPool, MockToken} from "../test/mocks/Mocks.sol";
 /// @dev Run against a fresh default Anvil instance (default mnemonic, chainId 31337):
 ///      anvil --chain-id 31337
 ///      forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 \
-///        --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+///        --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow
 ///      Every call is a broadcast tx signed by the sender, which is also the registry admin:
 ///      permissioned setup (registerAsset) and pool seeding work because msg.sender == ANVIL0.
 ///      The script writes `deployments/31337/addresses.json` (committed for the frontend).

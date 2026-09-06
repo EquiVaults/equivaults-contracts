@@ -60,9 +60,10 @@ library ExitLib {
             address a = assets[i];
             uint256 toSell = amounts[i];
             if (fee > 0) {
-                uint256 feeSlice = amounts[i].mulDiv(fee, valueWithdrawn, Math.Rounding.Ceil);
-                if (feeSlice > amounts[i]) feeSlice = amounts[i];
-                feePot += _sell(vault, a, feeSlice, _sellMinOut(vault, a, feeSlice));
+                // Forgive sub-token fee dust: rounding up can seize an indivisible token
+                // worth more than the entire realized gain.
+                uint256 feeSlice = amounts[i].mulDiv(fee, valueWithdrawn);
+                if (feeSlice != 0) feePot += _sell(vault, a, feeSlice, _sellMinOut(vault, a, feeSlice));
                 toSell = amounts[i] - feeSlice;
             }
             if (explicitFlags ? sellTokens[i] : true) {
@@ -83,6 +84,7 @@ library ExitLib {
     // ---------------------------------------------------------------------
 
     function _sell(EquiVault vault, address a, uint256 tokenAmount, uint256 minOut) private returns (uint256) {
+        if (tokenAmount == 0) return 0;
         address route = vault.registry().assetConfig(a).liquidityRoute;
         return ISwapRouter(route).swapExactIn(a, address(vault.settlementAsset()), tokenAmount, minOut);
     }

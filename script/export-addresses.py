@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export deployments/31337/addresses.json from the DeployLocal broadcast receipts.
 
-Run after `forge script script/DeployLocal.s.sol --broadcast` (chainId 31337):
+Run after `forge script script/DeployLocal.s.sol --broadcast --slow` (chainId 31337):
   python3 script/export-addresses.py
 
 Why not vm.writeJson inside the script: with --broadcast, forge re-executes the recorded
@@ -45,7 +45,7 @@ def main() -> None:
         sys.exit(f"missing broadcast receipts: {RUN_FILE}\n"
                  "run: anvil --chain-id 31337 && forge script script/DeployLocal.s.sol "
                  "--rpc-url http://127.0.0.1:8545 --broadcast --unlocked --sender "
-                 "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+                 "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow")
 
     run = json.loads(RUN_FILE.read_text())
     chain_id = str(run.get("chain", "31337"))
@@ -95,7 +95,7 @@ def main() -> None:
         "note": "Local dev environment. Regenerate with: anvil --chain-id 31337 && "
                 "forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 "
                 "--broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 "
-                "&& python3 script/export-addresses.py",
+                "--slow && python3 script/export-addresses.py",
         "admin": ANVIL0,
         "treasury": ANVIL2,
         "manager": ANVIL1,

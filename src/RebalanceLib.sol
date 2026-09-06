@@ -67,10 +67,14 @@ library RebalanceLib {
     /// @dev Gas reimbursement in settlement wei for `gasUsed` (measured by the vault itself, never
     /// here: `gasleft()` inside a DELEGATECALL library is amputated by the EIP-150 63/64 rule, so
     /// measuring here would overestimate the rebate). Times the transaction gas price, converted at
-    /// the fixed ETH price cap and clamped to `MAX_GAS_REBATE`.
-    function computeRebate(uint256 gasUsed) external view returns (uint256) {
+    /// the fixed ETH price cap, bounded by `MAX_GAS_REBATE` and the collective tolerance on
+    /// actual sell proceeds. Settlement donations must not enlarge the reimbursement budget.
+    function computeRebate(uint256 gasUsed, uint256 soldValueSettlement, uint16 slippageBps)
+        external view returns (uint256)
+    {
         uint256 rebateSettlement = gasUsed * tx.gasprice * ETH_SETTLEMENT_PRICE_CAP / 1e18;
-        return rebateSettlement > MAX_GAS_REBATE ? MAX_GAS_REBATE : rebateSettlement;
+        uint256 proceedsCap = soldValueSettlement.mulDiv(slippageBps, BPS_DENOMINATOR);
+        return Math.min(rebateSettlement, Math.min(MAX_GAS_REBATE, proceedsCap));
     }
 
     /// @dev Current basket weights in bps of NAV (0 when the NAV is 0), for the history event.

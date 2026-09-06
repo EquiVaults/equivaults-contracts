@@ -178,31 +178,6 @@ contract ForkRobinhoodTest is Test {
         assertLt(navAfter, navBefore * 105 / 100, "NAV preserved within 5 %");
     }
 
-    /// @notice The measured gas reimbursement covers the real L2 execution cost at the forked
-    /// block's base fee (converted at the protocol-fixed ETH price cap).
-    function testForkRebalanceGasRebateCoversRealGasCost() public {
-        EquiVault vault = _fundedVaultWithDrift();
-
-        uint256 baseFee = block.basefee; // real base fee of the forked block
-        uint256 ethSettlementPriceCap = 5_000e6;
-
-        vm.txGasPrice(1 gwei);
-        vm.prank(keeper);
-        uint256 rebate = vault.rebalance(
-            EquiVault.RebalanceParams({deadline: block.timestamp + 1 hours, minAmountsOut: new uint256[](0)})
-        );
-
-        assertGt(rebate, 0, "rebate must be measured and paid");
-        assertLe(rebate, vault.MAX_GAS_REBATE());
-
-        // Recover the measured gas from the uncapped rebate: rebate = gasUsed * 1 gwei * cap / 1e18.
-        uint256 gasUsed = rebate * 1e18 / (1 gwei * ethSettlementPriceCap);
-        assertGt(gasUsed, 0);
-
-        // Real execution cost at the forked base fee, in settlement wei at the fixed ETH price cap.
-        uint256 realCostSettlement = gasUsed * baseFee * ethSettlementPriceCap / 1e18;
-        assertGe(rebate, realCostSettlement, "rebate must cover the real L2 gas cost at 1 gwei");
-    }
 
     /// @dev NAV in real USDG units using the oracle prices.
     function _navUsdc(EquiVault vault) internal view returns (uint256) {

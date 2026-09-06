@@ -7,7 +7,7 @@ import {AssetRegistry} from "../src/AssetRegistry.sol";
 import {EquiVault} from "../src/EquiVault.sol";
 import {ISwapRouter} from "../src/interfaces/ISwapRouter.sol";
 
-import {MockOracle, MockPool, MockToken} from "./mocks/Mocks.sol";
+import {MockOracle, MockOracleRoute, MockPool, MockToken} from "./mocks/Mocks.sol";
 
 contract EquiVaultTest is Test {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
@@ -87,6 +87,40 @@ contract EquiVaultTest is Test {
         vm.stopPrank();
 
         vault = new EquiVault(usdc, registry, manager, assets(), weights(), 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0);
+    }
+
+    function testLowDecimalExitNeverRoundsFeeAboveRealizedGain() public {
+        MockToken indivisible = new MockToken(0);
+        MockOracleRoute route = new MockOracleRoute(registry, usdc, 0);
+        indivisible.mint(address(route), 100);
+        usdc.mint(address(route), 1_000_000e6);
+        vm.prank(admin);
+        registry.registerAsset(address(indivisible), primaryA, fallbackA, address(route), 1_000_000e18, MAX_PRICE_AGE);
+
+        address[] memory basket = new address[](1);
+        basket[0] = address(indivisible);
+        uint16[] memory target = new uint16[](1);
+        target[0] = 10_000;
+        EquiVault lowDecimals = new EquiVault(
+            usdc, registry, manager, basket, target, 2_000, 100,
+            EquiVault.TimelockMode.Immutable, 0, 1_000_000e6, 0, 0
+        );
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(lowDecimals), 100e6);
+        uint256 shares = enterVault(lowDecimals, 100e6, alice);
+        vm.stopPrank();
+        assertEq(indivisible.balanceOf(address(lowDecimals)), 1);
+
+        primaryA.setPrice(101e18, block.timestamp);
+        vm.prank(alice);
+        exitVault(lowDecimals, shares, alice, new bool[](1));
+
+        // A $0.20 fee cannot consume the investor's indivisible $101 token.
+        assertEq(indivisible.balanceOf(alice), 1);
+        assertLe(usdc.balanceOf(manager) + usdc.balanceOf(treasury), 200_000);
+        assertEq(lowDecimals.balanceOf(alice), 0);
+        assertEq(lowDecimals.costBasis(alice), 0);
     }
 
     // ------------------------------------------------------------------
@@ -642,8 +676,7 @@ contract EquiVaultTest is Test {
         uint256 rBIn = poolB.reserveOf(address(tokenB));
         uint256 rBOut = poolB.reserveOf(address(usdc));
 
-        uint256 feeSliceA = f.fee == 0 ? 0 : (f.amountA * f.fee + f.valueWithdrawn - 1) / f.valueWithdrawn;
-        if (feeSliceA > f.amountA) feeSliceA = f.amountA;
+        uint256 feeSliceA = f.fee == 0 ? 0 : f.amountA * f.fee / f.valueWithdrawn;
         if (feeSliceA > 0) {
             uint256 p = _poolOut(rAIn, rAOut, feeBps, feeSliceA);
             s.feePot += p;
@@ -660,8 +693,7 @@ contract EquiVaultTest is Test {
             s.tokenAOut = f.amountA - feeSliceA;
         }
 
-        uint256 feeSliceB = f.fee == 0 ? 0 : (f.amountB * f.fee + f.valueWithdrawn - 1) / f.valueWithdrawn;
-        if (feeSliceB > f.amountB) feeSliceB = f.amountB;
+        uint256 feeSliceB = f.fee == 0 ? 0 : f.amountB * f.fee / f.valueWithdrawn;
         if (feeSliceB > 0) {
             uint256 p = _poolOut(rBIn, rBOut, feeBps, feeSliceB);
             s.feePot += p;

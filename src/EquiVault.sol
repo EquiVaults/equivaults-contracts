@@ -448,18 +448,23 @@ contract EquiVault is ERC20, ReentrancyGuard {
         emit ReallocationCancelled(id);
     }
 
-    /// @dev Permissionless once `executableAt` is reached. Re-validates the target (asset statuses
-    /// and registry caps may have changed since propose), then migrates the basket: removed assets
-    /// are sold to the settlement asset and the freed balance is reinvested toward the new target
-    /// weights by deficit (kept and added assets alike), so no settlement is left idle outside
-    /// `totalAssets()`. Bounded by `sellMinOuts` in removed order and `buyMinOuts` in new-basket
-    /// order (0 = vault default slippage bound).
-    function executeReallocation(uint256[] calldata sellMinOuts, uint256[] calldata buyMinOuts)
-        external
-        nonReentrant
-    {
+    /// @dev Permissionless once `executableAt` is reached. `expectedProposalId` and `deadline`
+    /// bind the executor's consent to the displayed proposal and execution window. Re-validates
+    /// the target (asset statuses and registry caps may have changed since propose), then migrates
+    /// the basket: removed assets are sold to the settlement asset and the freed balance is
+    /// reinvested toward the new target weights by deficit (kept and added assets alike), so no
+    /// settlement is left idle outside `totalAssets()`. Bounded by `sellMinOuts` in removed order
+    /// and `buyMinOuts` in new-basket order (0 = vault default slippage bound).
+    function executeReallocation(
+        uint256 expectedProposalId,
+        uint256 deadline,
+        uint256[] calldata sellMinOuts,
+        uint256[] calldata buyMinOuts
+    ) external nonReentrant {
         ReallocationProposal memory proposal = _activeProposal;
         if (proposal.id == 0) revert NoActiveProposal();
+        if (expectedProposalId != proposal.id) revert ProposalIdMismatch(proposal.id, expectedProposalId);
+        if (deadline < block.timestamp) revert DeadlineExpired(block.timestamp);
         if (block.timestamp < proposal.executableAt) revert ProposalNotExecutable(proposal.executableAt);
 
         _validateReallocationTarget(proposal.assets, proposal.weightsBps, proposal.capAum);
@@ -503,10 +508,13 @@ contract EquiVault is ERC20, ReentrancyGuard {
         emit ParameterUpdateCancelled(id);
     }
 
-    /// @dev Permissionless once `executableAt` is reached; applies the proposed parameters.
-    function executeParameterUpdate() external nonReentrant {
+    /// @dev Permissionless once `executableAt` is reached. `expectedProposalId` and `deadline`
+    /// bind the executor's consent to the displayed proposal and execution window.
+    function executeParameterUpdate(uint256 expectedProposalId, uint256 deadline) external nonReentrant {
         ParameterProposal memory proposal = _activeParameterProposal;
         if (proposal.id == 0) revert NoActiveProposal();
+        if (expectedProposalId != proposal.id) revert ProposalIdMismatch(proposal.id, expectedProposalId);
+        if (deadline < block.timestamp) revert DeadlineExpired(block.timestamp);
         if (block.timestamp < proposal.executableAt) revert ProposalNotExecutable(proposal.executableAt);
 
         driftThresholdBps = proposal.driftThresholdBps;
@@ -555,9 +563,11 @@ contract EquiVault is ERC20, ReentrancyGuard {
         // Gas reimbursement: measured here in the vault (reading `gasleft()` inside the library
         // would be amputated by the EIP-150 63/64 rule and overestimate the gas used), converted at
         // a protocol-fixed ETH price cap and bounded by an absolute settlement cap, so an executor
-        // can neither inflate it nor receive anything without a valid rebalance. Paid between the
-        // sell and buy legs so the pool holds the settlement just received from sells.
-        uint256 gasRebate = RebalanceLib.computeRebate(startGas - gasleft());
+        // can neither inflate it nor receive anything without a valid rebalance. The rebate is
+        // additionally bounded by the collective tolerance applied to this rebalance's proceeds,
+        // preserving the buy leg even when the vault is smaller than the absolute rebate cap.
+        uint256 gasRebate =
+            RebalanceLib.computeRebate(startGas - gasleft(), soldValueSettlement, rebalanceSlippageBps);
         IERC20 settlement = settlementAsset;
         uint256 pool = settlement.balanceOf(address(this));
         if (gasRebate > pool) gasRebate = pool;

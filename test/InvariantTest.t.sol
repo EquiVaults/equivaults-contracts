@@ -15,6 +15,23 @@ import {ISwapRouter} from "../src/interfaces/ISwapRouter.sol";
 
 import {MockOracle, MockOracleRoute, MockToken} from "./mocks/Mocks.sol";
 
+/// @dev Expected proceeds of proportional fee slices on the fixture's fee-free oracle routes.
+/// Natural token units and settlement units both round down; fractional fees are uncollectable.
+function expectedExitFee(EquiVault vault, uint256 shares, uint256 value, uint256 cost)
+    view returns (uint256 proceeds)
+{
+    if (value <= cost) return 0;
+    uint256 fee = Math.mulDiv(value - cost, vault.feeBps(), 10_000);
+    address[] memory basket = vault.basketAssets();
+    for (uint256 i; i < basket.length; ++i) {
+        uint256 amount = Math.mulDiv(IERC20(basket[i]).balanceOf(address(vault)), shares, vault.totalSupply());
+        uint256 slice = Math.mulDiv(amount, fee, value);
+        (uint256 price,) = vault.registry().getPrice(basket[i], address(vault.settlementAsset()));
+        uint256 scale = 10 ** uint256(vault.registry().assetConfig(basket[i]).decimals);
+        proceeds += Math.mulDiv(slice, price * 10 ** vault.settlementDecimals(), scale * 1e18);
+    }
+}
+
 function enterVault(EquiVault vault, uint256 settlementIn, address receiver) returns (uint256) {
     return vault.enter(EquiVault.EnterParams({
         settlementIn: settlementIn,
@@ -286,6 +303,10 @@ contract EquiVaultHandler is Test {
         uint256 n = vault.basketAssets().length;
         uint256[] memory mins = withMins ? new uint256[](n) : new uint256[](0);
 
+        usdc.mint(u, amount);
+        vm.prank(u);
+        usdc.approve(address(vault), amount);
+        vm.prank(u);
         try vault.enter(EquiVault.EnterParams({
             settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: mins, deadline: type(uint256).max, proposalId: 0
         })) returns (uint256 shares) {
@@ -302,7 +323,7 @@ contract EquiVaultHandler is Test {
     // Redemptions (mixed token / settlement choices)
     // ------------------------------------------------------------------
 
-    function redeem(uint256 seed, uint8 userIdx, uint256 pct, uint256 flagSeed) external {
+    function redeem(uint256, uint8 userIdx, uint256 pct, uint256 flagSeed) external {
         address u = _user(userIdx);
         uint256 sharesBefore = vault.balanceOf(u);
         if (sharesBefore == 0) return;
@@ -318,19 +339,19 @@ contract EquiVaultHandler is Test {
         uint256 costBefore = vault.costBasis(u);
 
         uint256 valueWithdrawn = vault.quoteExitValue(shares);
+        uint256 realizedCost = costBefore.mulDiv(shares, sharesBefore);
+        uint256 expectedFee = expectedExitFee(vault, shares, valueWithdrawn, realizedCost);
+        vm.prank(u);
         try vault.exit(EquiVault.ExitParams({
             shares: shares, receiver: u, sellTokens: flags, minAmountsOut: new uint256[](0), minSettlementOut: 0,
             deadline: type(uint256).max
         })) returns (uint256) {
-            uint256 realizedCost = costBefore.mulDiv(shares, sharesBefore);
             ghostCost[u] -= realizedCost;
             ghostShares[u] -= shares;
             ghostTotalShares -= shares;
             ghostWithdrawn += valueWithdrawn;
             ghostNav -= valueWithdrawn;
-            if (valueWithdrawn > realizedCost) {
-                ghostFees += (valueWithdrawn - realizedCost).mulDiv(FEE_BPS, 10_000);
-            }
+            ghostFees += expectedFee;
         } catch {}
     }
 
@@ -354,7 +375,7 @@ contract EquiVaultHandler is Test {
         _refreshOracleTimestamps(); // keep prices fresh after the timelock warp
         uint256[] memory sellMins = new uint256[](0);
         uint256[] memory buyMins = new uint256[](0);
-        try vault.executeReallocation(sellMins, buyMins) {
+        try vault.executeReallocation(vault.activeProposal().id, type(uint256).max, sellMins, buyMins) {
             ghostActiveProposal = false;
             // Zero-fee migration preserves NAV: removed assets sell at oracle price and added
             // assets are bought from the freed settlement; only sub-wei rounding dust is lost.
@@ -400,6 +421,12 @@ contract EquiVaultInvariantTest is InvariantBase {
             vault, registry, usdc, tokenA, tokenB, tokenC, primaryA, primaryB, primaryC, manager, alice, bob, carol
         );
         targetContract(address(handler));
+        // Fail setup if actor funding or caller context makes the fuzz campaign vacuous.
+        handler.deposit(0, 0, 1_000e6);
+        uint256 shares = vault.balanceOf(alice);
+        assertGt(shares, 0, "handler must exercise a real deposit");
+        handler.redeem(0, 0, 50, 0);
+        assertEq(vault.balanceOf(alice), shares - shares / 2, "handler must exercise a real exit");
     }
 
     function _users() internal view returns (address[3] memory) {
@@ -705,12 +732,16 @@ contract StressHandler is Test {
         address u = _user(userIdx);
         amount = bound(amount, 1, 100_000e6);
         if (vault.activeProposal().id != 0) return; // deposit then requires explicit consent
+        usdc.mint(u, amount);
+        vm.prank(u);
+        usdc.approve(address(vault), amount);
 
         bool paused = vault.paused();
         if (!paused) {
             uint256 navBefore = vault.totalAssets();
             uint256 navAfter = navBefore + amount;
             if (navAfter > vault.capAum() && seed % 4 != 0) return; // 1/4 still attempt to probe the guard
+            vm.prank(u);
             try vault.enter(EquiVault.EnterParams({
                 settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: new uint256[](0),
                 deadline: type(uint256).max, proposalId: 0
@@ -720,6 +751,7 @@ contract StressHandler is Test {
             } catch {}
         } else {
             // Paused: attempt anyway; success would mean the pause guard is broken.
+            vm.prank(u);
             try vault.enter(EquiVault.EnterParams({
                 settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: new uint256[](0),
                 deadline: type(uint256).max, proposalId: 0
@@ -765,22 +797,27 @@ contract StressHandler is Test {
         for (uint256 i = 0; i < n; ++i) flags[i] = (flagSeed >> i) & 1 == 1;
 
         uint256 costBefore = vault.costBasis(u);
-        bool paused = vault.paused();
-
-        uint256 valueWithdrawn = vault.quoteExitValue(shares);
+        bool exitBlocked;
+        uint256 valueWithdrawn;
+        // Still call exit when an oracle fails, rather than reverting the handler at the quote.
+        try vault.quoteExitValue(shares) returns (uint256 value) {
+            valueWithdrawn = value;
+        } catch {
+            exitBlocked = true;
+        }
+        uint256 realizedCost = costBefore.mulDiv(shares, sharesBefore);
+        uint256 expectedFee = exitBlocked ? 0 : expectedExitFee(vault, shares, valueWithdrawn, realizedCost);
+        vm.prank(u);
         try vault.exit(EquiVault.ExitParams({
             shares: shares, receiver: u, sellTokens: flags, minAmountsOut: new uint256[](0), minSettlementOut: 0,
             deadline: type(uint256).max
         })) returns (uint256) {
-            if (paused) ghostPauseViolation = true;
-            uint256 realizedCost = costBefore.mulDiv(shares, sharesBefore);
+            if (exitBlocked) ghostPauseViolation = true;
             ghostCost[u] -= realizedCost;
             ghostShares[u] -= shares;
             ghostTotalShares -= shares;
             ghostNav -= valueWithdrawn;
-            if (valueWithdrawn > realizedCost) {
-                ghostFees += (valueWithdrawn - realizedCost).mulDiv(FEE_BPS, 10_000);
-            }
+            ghostFees += expectedFee;
         } catch {}
     }
 
@@ -830,7 +867,7 @@ contract StressHandler is Test {
         _maybeRefreshPrices();
         uint256[] memory sellMins = new uint256[](0);
         uint256[] memory buyMins = new uint256[](0);
-        try vault.executeReallocation(sellMins, buyMins) {
+        try vault.executeReallocation(vault.activeProposal().id, type(uint256).max, sellMins, buyMins) {
             ghostActiveProposal = false;
         } catch {
             // e.g. deposits paused: execution re-validates admissibility; retry on a later step
@@ -934,6 +971,14 @@ contract ProtocolStressInvariantTest is InvariantBase {
             fallbackC, manager, admin, keeper, alice, bob, carol
         );
         targetContract(address(handler));
+        handler.deposit(0, 0, 1_000e6);
+        uint256 shares = vault.balanceOf(alice);
+        assertGt(shares, 0, "stress handler must exercise a real deposit");
+        handler.setDepositsPaused(0, true);
+        handler.redeemMixed(0, 0, 50, 0);
+        assertEq(vault.balanceOf(alice), shares - shares / 2, "deposit pause must still permit an exit");
+        assertFalse(handler.ghostPauseViolation());
+        handler.setDepositsPaused(0, false);
     }
 
     function _users() internal view returns (address[3] memory) {
@@ -1066,7 +1111,7 @@ contract AttackToken is ERC20 {
                 );
             } else if (mode == 4) {
                 uint256[] memory empty = new uint256[](0);
-                vault.executeReallocation(empty, empty);
+                vault.executeReallocation(vault.activeProposal().id, type(uint256).max, empty, empty);
             }
         }
         super._update(from, to, amount);
@@ -1115,7 +1160,7 @@ contract AttackRoute is ISwapRouter {
                 );
             } else if (mode == 4) {
                 uint256[] memory empty = new uint256[](0);
-                vault.executeReallocation(empty, empty);
+                vault.executeReallocation(vault.activeProposal().id, type(uint256).max, empty, empty);
             }
         }
         require(assetIn == address(settlement) || assetOut == address(settlement), "AttackRoute: wrong pair");
@@ -1321,14 +1366,15 @@ contract ReentrancyInvariantTest is Test {
         vault.proposeReallocation(target, weights, VAULT_CAP);
         vm.warp(block.timestamp + 1 days + 1);
         // refresh tokenA/attackToken/tokenB prices after the warp (MAX_PRICE_AGE = 3 days: still fresh)
+        uint256 proposalId = vault.activeProposal().id;
 
         routeA.arm(vault, 4); // nested executeReallocation during the sell leg
         uint256[] memory empty = new uint256[](0);
         _expectGuard();
-        vault.executeReallocation(empty, empty);
+        vault.executeReallocation(proposalId, type(uint256).max, empty, empty);
 
         routeA.disarm();
-        vault.executeReallocation(empty, empty);
+        vault.executeReallocation(proposalId, type(uint256).max, empty, empty);
         assertEq(vault.basketAssets().length, 2);
         assertEq(vault.basketAssets()[0], address(attackToken));
         assertEq(vault.basketAssets()[1], address(tokenB));

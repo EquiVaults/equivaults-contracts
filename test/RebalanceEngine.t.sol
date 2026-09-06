@@ -211,11 +211,11 @@ contract RebalanceEngineTest is Test {
         assertEq(p.executableAt, block.timestamp + 1 days);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalNotExecutable.selector, p.executableAt));
-        vault.executeParameterUpdate();
+        vault.executeParameterUpdate(p.id, type(uint256).max);
 
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
-        vault.executeParameterUpdate();
+        vault.executeParameterUpdate(p.id, type(uint256).max);
 
         assertEq(vault.driftThresholdBps(), 500);
         assertEq(vault.rebalanceSlippageBps(), 200);
@@ -225,9 +225,10 @@ contract RebalanceEngineTest is Test {
     function testParameterUpdateInstant() public {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         _proposeParameters(vault, 400, 250);
+        uint256 id = vault.activeParameterProposal().id;
         // No warp: executable right away, permissionless execution by alice.
         vm.prank(alice);
-        vault.executeParameterUpdate();
+        vault.executeParameterUpdate(id, type(uint256).max);
         assertEq(vault.driftThresholdBps(), 400);
         assertEq(vault.rebalanceSlippageBps(), 250);
     }
@@ -277,6 +278,28 @@ contract RebalanceEngineTest is Test {
         (uint256 maxDev, bool above) = vault.measureDrift();
         assertFalse(above);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.DriftBelowThreshold.selector, maxDev, uint16(300)));
+        _rebalance(vault, new uint256[](0));
+    }
+
+    function testSmallVaultRebatePreservesBuyLegAndCannotBeRepeated() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
+        usdc.mint(alice, 1e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 1e6);
+        enterVault(vault, 1e6, alice);
+        vm.stopPrank();
+        primaryA.setPrice(200e18, block.timestamp);
+        uint256 navBefore = vault.totalAssets();
+        uint256 underweightBefore = tokenB.balanceOf(address(vault));
+
+        vm.txGasPrice(100 gwei);
+        _rebalance(vault, new uint256[](0));
+
+        assertGt(tokenB.balanceOf(address(vault)), underweightBefore, "rebate consumed the buy leg");
+        assertGe(vault.totalAssets(), navBefore * 99 / 100, "rebate consumed investor principal");
+        (uint256 drift, bool above) = vault.measureDrift();
+        assertFalse(above, "rebate left a repeatable rebalance");
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.DriftBelowThreshold.selector, drift, vault.driftThresholdBps()));
         _rebalance(vault, new uint256[](0));
     }
 
@@ -337,6 +360,9 @@ contract RebalanceEngineTest is Test {
 
     function testRebalanceGasRebateIsCapped() public {
         EquiVault vault = _fundedVaultWithDrift(EquiVault.TimelockMode.Instant, 0);
+        // Enough proceeds for the absolute cap, rather than the proportional budget, to bind.
+        tokenA.mint(address(vault), tokenA.balanceOf(address(vault)) * 99);
+        tokenB.mint(address(vault), tokenB.balanceOf(address(vault)) * 99);
 
         vm.txGasPrice(1_000 gwei);
         uint256 rebate = _rebalance(vault, new uint256[](0));
@@ -458,13 +484,14 @@ contract RebalanceEngineTest is Test {
 
         // Raising the threshold to 10 points (1,000 bps) above the current drift blocks rebalancing.
         _proposeParameters(vault, 1_000, 100);
+        uint256 id = vault.activeParameterProposal().id;
         vm.warp(block.timestamp + 1 days);
         // Refresh prices keeping the drifted A price, otherwise the drift would vanish.
         primaryA.setPrice(125e18, block.timestamp);
         fallbackA.setPrice(99e18, block.timestamp);
         primaryB.setPrice(PRICE_B, block.timestamp);
         fallbackB.setPrice(49e18, block.timestamp);
-        vault.executeParameterUpdate();
+        vault.executeParameterUpdate(id, type(uint256).max);
         assertEq(vault.driftThresholdBps(), 1_000);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.DriftBelowThreshold.selector, maxDev, uint16(1_000)));

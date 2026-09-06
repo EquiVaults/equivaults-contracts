@@ -174,6 +174,12 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         vault.proposeReallocation(assets, weights, cap);
     }
 
+    function _executeReallocation(EquiVault vault, uint256[] memory sellMinOuts, uint256[] memory buyMinOuts)
+        internal
+    {
+        vault.executeReallocation(vault.activeProposal().id, type(uint256).max, sellMinOuts, buyMinOuts);
+    }
+
     // ------------------------------------------------------------------
     // Construction
     // ------------------------------------------------------------------
@@ -209,9 +215,10 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         enterVault(vault, 1_000e6, alice);
 
         _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        uint256 id = vault.activeProposal().id;
         // No warp: executable right away, and permissionless (executed by alice, not the manager).
         vm.prank(alice);
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(id, type(uint256).max, new uint256[](0), new uint256[](0));
 
         address[] memory assets = vault.basketAssets();
         assertEq(assets.length, 2);
@@ -232,11 +239,11 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertEq(p.executableAt, block.timestamp + 1 days);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalNotExecutable.selector, p.executableAt));
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(p.id, type(uint256).max, new uint256[](0), new uint256[](0));
 
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(p.id, type(uint256).max, new uint256[](0), new uint256[](0));
         assertEq(vault.activeProposal().id, 0);
     }
 
@@ -303,7 +310,114 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     function testExecuteWithoutProposalReverts() public {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
         vm.expectRevert(EquiVault.NoActiveProposal.selector);
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(0, type(uint256).max, new uint256[](0), new uint256[](0));
+    }
+
+    function testExecutionRejectsStaleReallocationIdAfterReplacement() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        uint256 staleId = vault.activeProposal().id;
+        vm.prank(manager);
+        vault.cancelReallocation();
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(2), staleId));
+        vault.executeReallocation(staleId, type(uint256).max, new uint256[](0), new uint256[](0));
+
+        assertEq(vault.activeProposal().id, 2);
+        assertEq(vault.basketAssets()[1], address(tokenB));
+        assertEq(vault.capAum(), 1_000_000e6);
+    }
+
+    function testReallocationExecutionDeadlineBoundaries() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        uint256 id = vault.activeProposal().id;
+
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.DeadlineExpired.selector, block.timestamp));
+        vault.executeReallocation(id, block.timestamp - 1, new uint256[](0), new uint256[](0));
+        assertEq(vault.activeProposal().id, id);
+        assertEq(vault.basketAssets()[1], address(tokenB));
+        assertEq(vault.capAum(), 1_000_000e6);
+
+        vm.prank(alice);
+        vault.executeReallocation(id, block.timestamp, new uint256[](0), new uint256[](0));
+        assertEq(vault.activeProposal().id, 0);
+        assertEq(vault.basketAssets()[1], address(tokenC));
+        assertEq(vault.capAum(), 1_500_000e6);
+
+        EquiVault laterVault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        _propose(laterVault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        uint256 laterId = laterVault.activeProposal().id;
+        vm.prank(bob);
+        laterVault.executeReallocation(laterId, block.timestamp + 1, new uint256[](0), new uint256[](0));
+        assertEq(laterVault.activeProposal().id, 0);
+        assertEq(laterVault.basketAssets()[1], address(tokenC));
+    }
+
+    function testExecutionRejectsAlreadyExecutedProposals() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        uint256 reallocationId = vault.activeProposal().id;
+        vault.executeReallocation(reallocationId, type(uint256).max, new uint256[](0), new uint256[](0));
+
+        vm.expectRevert(EquiVault.NoActiveProposal.selector);
+        vault.executeReallocation(reallocationId, type(uint256).max, new uint256[](0), new uint256[](0));
+
+        vm.prank(manager);
+        vault.proposeParameters(500, 50);
+        uint256 parameterId = vault.activeParameterProposal().id;
+        vault.executeParameterUpdate(parameterId, type(uint256).max);
+
+        vm.expectRevert(EquiVault.NoActiveProposal.selector);
+        vault.executeParameterUpdate(parameterId, type(uint256).max);
+    }
+
+    function testExecutionRejectsStaleParameterIdAfterReplacement() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        vm.prank(manager);
+        vault.proposeParameters(500, 50);
+        uint256 staleId = vault.activeParameterProposal().id;
+        vm.prank(manager);
+        vault.cancelParameterUpdate();
+        vm.prank(manager);
+        vault.proposeParameters(600, 75);
+
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(2), staleId));
+        vault.executeParameterUpdate(staleId, type(uint256).max);
+
+        assertEq(vault.activeParameterProposal().id, 2);
+        assertEq(vault.driftThresholdBps(), 300);
+        assertEq(vault.rebalanceSlippageBps(), 100);
+    }
+
+    function testParameterUpdateExecutionDeadlineBoundaries() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        vm.prank(manager);
+        vault.proposeParameters(500, 50);
+        uint256 id = vault.activeParameterProposal().id;
+
+        vm.expectRevert(abi.encodeWithSelector(EquiVault.DeadlineExpired.selector, block.timestamp));
+        vault.executeParameterUpdate(id, block.timestamp - 1);
+        assertEq(vault.activeParameterProposal().id, id);
+        assertEq(vault.driftThresholdBps(), 300);
+        assertEq(vault.rebalanceSlippageBps(), 100);
+
+        vm.prank(alice);
+        vault.executeParameterUpdate(id, block.timestamp);
+        assertEq(vault.activeParameterProposal().id, 0);
+        assertEq(vault.driftThresholdBps(), 500);
+        assertEq(vault.rebalanceSlippageBps(), 50);
+
+        EquiVault laterVault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        vm.prank(manager);
+        laterVault.proposeParameters(600, 75);
+        uint256 laterId = laterVault.activeParameterProposal().id;
+        vm.prank(bob);
+        laterVault.executeParameterUpdate(laterId, block.timestamp + 1);
+        assertEq(laterVault.activeParameterProposal().id, 0);
+        assertEq(laterVault.driftThresholdBps(), 600);
+        assertEq(laterVault.rebalanceSlippageBps(), 75);
     }
 
     function testProposalEventsEmitFullHistory() public {
@@ -320,7 +434,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         _refreshPrices();
         vm.expectEmit(true, true, false, true);
         emit EquiVault.ReallocationExecuted(1, assets, weights, 1_500_000e6);
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        _executeReallocation(vault, new uint256[](0), new uint256[](0));
 
         vm.prank(manager);
         vault.proposeReallocation(assets, weights, 1_500_000e6);
@@ -451,7 +565,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        _executeReallocation(vault, new uint256[](0), new uint256[](0));
 
         // Removed asset fully sold; kept asset untouched; added asset bought.
         assertEq(tokenB.balanceOf(address(vault)), 0);
@@ -483,6 +597,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     function testReexecutionRevalidatesTarget() public {
         EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
         _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        uint256 id = vault.activeProposal().id;
 
         // Asset C becomes non-admissible before execution: the execute must refuse.
         vm.prank(admin);
@@ -490,7 +605,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
         vm.expectRevert(abi.encodeWithSelector(EquiVault.AssetNotAdmissible.selector, address(tokenC)));
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(id, type(uint256).max, new uint256[](0), new uint256[](0));
     }
 
     function testReallocationRejectsTooPermissiveSellAndBuyMins() public {
@@ -506,14 +621,15 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         _propose(vault, onlyA, fullWeight, 1_000_000e6);
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
+        uint256 id = vault.activeProposal().id;
 
         uint256[] memory permissiveSell = new uint256[](1);
         permissiveSell[0] = 1;
         vm.expectRevert();
-        vault.executeReallocation(permissiveSell, new uint256[](0));
+        vault.executeReallocation(id, type(uint256).max, permissiveSell, new uint256[](0));
 
         // The unchanged proposal remains executable with the vault's oracle-derived defaults.
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        _executeReallocation(vault, new uint256[](0), new uint256[](0));
         assertEq(vault.basketAssets().length, 1);
     }
 
@@ -528,8 +644,9 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         _refreshPrices();
         uint256[] memory permissiveBuy = new uint256[](2);
         permissiveBuy[1] = 1; // C is newly bought and its oracle minimum is materially higher.
+        uint256 id = vault.activeProposal().id;
         vm.expectRevert();
-        vault.executeReallocation(new uint256[](0), permissiveBuy);
+        vault.executeReallocation(id, type(uint256).max, new uint256[](0), permissiveBuy);
     }
 
     // ------------------------------------------------------------------
@@ -562,7 +679,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         _propose(vault, _assetsAB(), _weights(6_000, 4_000), 700e6);
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        _executeReallocation(vault, new uint256[](0), new uint256[](0));
         assertEq(vault.capAum(), 700e6);
 
         // NAV (~800e6) is above the new cap: deposits are refused, no forced withdrawal.
@@ -590,7 +707,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
 
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        _executeReallocation(vault, new uint256[](0), new uint256[](0));
         assertEq(vault.capAum(), 1_100e6);
 
         vm.prank(bob);
@@ -619,8 +736,9 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         vm.warp(block.timestamp + 1 days + 1);
         _refreshPrices();
 
+        uint256 id = vault.activeProposal().id;
         vm.prank(bob);
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(id, type(uint256).max, new uint256[](0), new uint256[](0));
 
         // tokenB was sold and the proceeds fully reinvested into tokenA.
         assertEq(vault.basketAssets().length, 1);
@@ -660,8 +778,9 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         vm.warp(block.timestamp + 1 days + 1);
         _refreshPrices();
 
+        uint256 id = vault.activeProposal().id;
         vm.prank(bob);
-        vault.executeReallocation(new uint256[](0), new uint256[](0));
+        vault.executeReallocation(id, type(uint256).max, new uint256[](0), new uint256[](0));
 
         assertEq(vault.basketAssets().length, 2);
         assertEq(vault.basketAssets()[0], address(tokenB));
