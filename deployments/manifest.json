@@ -1,7 +1,7 @@
 {
   "schema": "equivaults-integration-artifacts/v1",
-  "contractsCommit": "9b11ae4920f752f8594dec8b0e686e44d5948392",
-  "generatedAt": "2026-08-10",
+  "contractsCommit": "3e4f8cf5d722dd692b97d3d8ce6011b42e6c2506",
+  "generatedAt": "2026-09-06",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",
@@ -16,8 +16,8 @@
     "31337": {
       "addressesFile": "deployments/31337/addresses.json",
       "network": "anvil-local",
-      "note": "Regenerate with: anvil --chain-id 31337 && forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 && python3 script/export-addresses.py"
+      "note": "Regenerate with: anvil --chain-id 31337 && forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow && python3 script/export-addresses.py"
     }
   },
-  "note": "Regenerate ABI + manifest after any contract change: ./script/export-artifacts.sh"
+  "note": "Regenerate ABI and manifest after any contract change: ./script/export-artifacts.sh"
 }

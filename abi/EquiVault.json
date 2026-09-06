@@ -593,7 +593,18 @@
   {
     "type": "function",
     "name": "executeParameterUpdate",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "expectedProposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "outputs": [],
     "stateMutability": "nonpayable"
   },
@@ -601,6 +612,16 @@
     "type": "function",
     "name": "executeReallocation",
     "inputs": [
+      {
+        "name": "expectedProposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
       {
         "name": "sellMinOuts",
         "type": "uint256[]",
