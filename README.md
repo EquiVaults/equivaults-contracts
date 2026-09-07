@@ -41,8 +41,18 @@ Clients consume `abi/`, `deployments/manifest.json` and per-chain address files.
 `executeParameterUpdate` requires `(expectedProposalId, deadline)`. Regenerate and consume the
 published ABI before calling either execution path. Existing non-upgradeable deployments retain
 the previous signatures and cannot gain this execution-consent protection by changing source.
+`cancelReallocation` and `cancelParameterUpdate` each require `(expectedProposalId)`.
+Only the manager can cancel. A missing, replaced or already processed proposal is rejected
+without deleting a replacement. Cancellation has no deadline and never applies pending changes.
+This is a breaking ABI change: old non-upgradeable vaults retain their previous cancellation
+semantics and must not be treated as ID-guarded instances.
 `script/export-artifacts.sh` refuses uncommitted source so the manifest's commit cannot
 misrepresent the compiled contracts. Commit reviewed source before publishing a new manifest.
+
+If local script execution stalls while resolving external Sourcify source labels, add
+`--offline` to `forge script` after the pinned compiler and dependencies are installed.
+This skips external source discovery, not the explicit Anvil RPC, broadcast or EIP-170 checks.
+
 ## Economic and operational limits
 
 - Performance fees sell proportional token slices rounded down. Uncollectable fractional

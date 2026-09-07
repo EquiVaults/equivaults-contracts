@@ -470,14 +470,26 @@
   {
     "type": "function",
     "name": "cancelParameterUpdate",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "expectedProposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "outputs": [],
     "stateMutability": "nonpayable"
   },
   {
     "type": "function",
     "name": "cancelReallocation",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "expectedProposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "outputs": [],
     "stateMutability": "nonpayable"
   },
