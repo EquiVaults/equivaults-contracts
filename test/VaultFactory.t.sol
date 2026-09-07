@@ -159,9 +159,10 @@ contract VaultFactoryTest is Test {
 
         vm.prank(manager);
         v.proposeReallocation(_assetsAB(), _weightsAB(), 1_000_000e6);
+        uint256 proposalId = v.activeProposal().id;
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.NotManager.selector));
-        v.cancelReallocation();
+        v.cancelReallocation(proposalId);
     }
 
     // ------------------------------------------------------------------

@@ -245,19 +245,21 @@ contract RebalanceEngineTest is Test {
         // A pending basket proposal blocks a parameter proposal...
         vm.prank(manager);
         vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 1_000_000e6);
+        uint256 reallocationId = vault.activeProposal().id;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalAlreadyActive.selector, uint256(1)));
         _proposeParameters(vault, 500, 200);
 
         // ...cancelling it frees the slot; a pending parameter proposal then blocks a basket one.
         vm.prank(manager);
-        vault.cancelReallocation();
+        vault.cancelReallocation(reallocationId);
         _proposeParameters(vault, 500, 200);
+        uint256 parameterId = vault.activeParameterProposal().id;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalAlreadyActive.selector, uint256(2)));
         vm.prank(manager);
         vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 1_000_000e6);
 
         vm.prank(manager);
-        vault.cancelParameterUpdate();
+        vault.cancelParameterUpdate(parameterId);
         vm.prank(manager);
         vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 1_000_000e6);
         assertEq(vault.activeProposal().id, 3);

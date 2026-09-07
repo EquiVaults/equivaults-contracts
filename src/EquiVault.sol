@@ -441,9 +441,12 @@ contract EquiVault is ERC20, ReentrancyGuard {
         emit ReallocationProposed(id, manager, executableAt, assets_, weightsBps_, capAum_);
     }
 
-    function cancelReallocation() external onlyManager {
-        if (_activeProposal.id == 0) revert NoActiveProposal();
+    /// @notice Cancels only the reallocation identified by the manager's consent.
+    /// @dev A replaced, executed or already cancelled proposal cannot be cancelled by a stale request.
+    function cancelReallocation(uint256 expectedProposalId) external onlyManager {
         uint256 id = _activeProposal.id;
+        if (id == 0) revert NoActiveProposal();
+        if (expectedProposalId != id) revert ProposalIdMismatch(id, expectedProposalId);
         delete _activeProposal;
         emit ReallocationCancelled(id);
     }
@@ -501,9 +504,12 @@ contract EquiVault is ERC20, ReentrancyGuard {
         emit ParameterUpdateProposed(id, executableAt, driftThresholdBps_, rebalanceSlippageBps_);
     }
 
-    function cancelParameterUpdate() external onlyManager {
-        if (_activeParameterProposal.id == 0) revert NoActiveProposal();
+    /// @notice Cancels only the parameter update identified by the manager's consent.
+    /// @dev Does not apply the pending parameters or change the current basket.
+    function cancelParameterUpdate(uint256 expectedProposalId) external onlyManager {
         uint256 id = _activeParameterProposal.id;
+        if (id == 0) revert NoActiveProposal();
+        if (expectedProposalId != id) revert ProposalIdMismatch(id, expectedProposalId);
         delete _activeParameterProposal;
         emit ParameterUpdateCancelled(id);
     }
