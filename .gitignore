@@ -1,6 +1,8 @@
 # Foundry build artifacts and local cache
 out/
 cache/
+.local-demo/
+deployments/31337/demo.json
 
 # Local deployment simulation and broadcast logs
 broadcast/
@@ -9,3 +11,6 @@ broadcast/
 .env
 .env.*
 !.env.example
+
+# Python tooling cache
+__pycache__/

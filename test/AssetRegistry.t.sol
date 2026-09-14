@@ -9,7 +9,6 @@ import {MockOracle, MockToken} from "./mocks/Mocks.sol";
 
 contract AssetRegistryTest is Test {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
-    uint256 internal constant EXPOSURE_CAP = 1_000_000e18;
 
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
@@ -33,7 +32,7 @@ contract AssetRegistryTest is Test {
         fallbackOracle.setPrice(19e17, block.timestamp);
 
         vm.prank(admin);
-        registry.registerAsset(address(asset), primary, fallbackOracle, route, EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(asset), primary, fallbackOracle, route, MAX_PRICE_AGE);
     }
 
     function testRegistersValidatedAssetConfig() public view {
@@ -42,7 +41,6 @@ contract AssetRegistryTest is Test {
         assertEq(address(config.primaryOracle), address(primary));
         assertEq(address(config.fallbackOracle), address(fallbackOracle));
         assertEq(config.liquidityRoute, route);
-        assertEq(config.exposureCapE18, EXPOSURE_CAP);
         assertEq(config.maxPriceAge, MAX_PRICE_AGE);
         assertEq(config.decimals, 6);
         assertEq(uint256(config.status), uint256(AssetRegistry.AssetStatus.Active));
@@ -51,7 +49,7 @@ contract AssetRegistryTest is Test {
     function testRejectsNonTokenAsset() public {
         vm.expectRevert(abi.encodeWithSelector(AssetRegistry.InvalidToken.selector, address(this)));
         vm.prank(admin);
-        registry.registerAsset(address(this), primary, fallbackOracle, route, EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(this), primary, fallbackOracle, route, MAX_PRICE_AGE);
     }
 
     function testResolvesFallbackPriceWithoutStoringIt() public {
@@ -69,15 +67,6 @@ contract AssetRegistryTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(AssetRegistry.PriceUnavailable.selector, address(asset), quote));
         registry.getPrice(address(asset), quote);
-    }
-
-    function testExposureCapBoundsVaultAumAndCanBeLowered() public {
-        assertEq(registry.maxVaultAum(address(asset), 2_000), 5_000_000e18);
-
-        vm.prank(admin);
-        registry.setExposureCap(address(asset), 400_000e18);
-
-        assertEq(registry.maxVaultAum(address(asset), 2_000), 2_000_000e18);
     }
 
     function testExitOnlyQuarantineAndPauseBlockNewExposureButAllowExits() public {
@@ -103,10 +92,10 @@ contract AssetRegistryTest is Test {
         assertTrue(registry.canExit(address(asset)));
     }
 
-    function testOnlyAdminCanMutateAssetConfig() public {
+    function testOnlyAdminCanUpdateAssetStatus() public {
         vm.prank(makeAddr("attacker"));
         vm.expectRevert();
-        registry.setExposureCap(address(asset), EXPOSURE_CAP / 2);
+        registry.setAssetStatus(address(asset), AssetRegistry.AssetStatus.ExitOnly);
     }
 
     function testAdminRotationNeedsDelayAndAcceptance() public {
@@ -123,10 +112,10 @@ contract AssetRegistryTest is Test {
 
         vm.prank(admin);
         vm.expectRevert();
-        registry.setExposureCap(address(asset), EXPOSURE_CAP / 2);
+        registry.setAssetStatus(address(asset), AssetRegistry.AssetStatus.ExitOnly);
 
         vm.prank(nextAdmin);
-        registry.setExposureCap(address(asset), EXPOSURE_CAP / 2);
+        registry.setAssetStatus(address(asset), AssetRegistry.AssetStatus.ExitOnly);
     }
 
     function testTreasuryRotationNeedsSevenDayNotice() public {

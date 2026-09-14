@@ -15,12 +15,6 @@ contract TimelockTest is Test {
     uint256 internal constant PRICE_B = 50e18; // $50 per whole token
     uint256 internal constant PRICE_C = 200e18; // $200 per whole token
     uint256 internal constant SHARE_SCALE = 1e6; // _decimalsOffset() = 6
-    // Registry exposure cap per asset (USD at 1e18): yields clean vault AUM bounds in USDC units.
-    uint256 internal constant EXPOSURE_CAP = 1_200_000e18;
-    // Bound for the [A, B] 6000/4000 basket = min(1.2e24*10000/6000, 1.2e24*10000/4000)/1e12.
-    uint256 internal constant BOUND_AB = 2_000_000e6;
-    // Bound for the [A, C] 5000/5000 basket = 1.2e24*10000/5000/1e12.
-    uint256 internal constant BOUND_AC = 2_400_000e6;
 
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
@@ -77,9 +71,9 @@ contract TimelockTest is Test {
 
         registry = new AssetRegistry(admin, treasury);
         vm.startPrank(admin);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenC), primaryC, fallbackC, address(poolC), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenC), primaryC, fallbackC, address(poolC), MAX_PRICE_AGE);
         vm.stopPrank();
     }
 
@@ -123,13 +117,13 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
 }
 
 /// @dev [A, B] 6000/4000 basket on a fresh vault.
-    function _deployVault(EquiVault.TimelockMode mode, uint256 delay, uint256 cap)
+    function _deployVault(EquiVault.TimelockMode mode, uint256 delay)
         internal
         returns (EquiVault vault)
     {
         address[] memory a = _assetsAB();
         uint16[] memory w = _weights(6_000, 4_000);
-        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 100, mode, delay, cap, 0, 0);
+        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 100, mode, delay, 0, 0);
     }
 
     function _assetsAB() internal view returns (address[] memory) {
@@ -169,9 +163,9 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         fallbackC.setPrice(199e18, block.timestamp);
     }
 
-    function _propose(EquiVault vault, address[] memory assets, uint16[] memory weights, uint256 cap) internal {
+    function _propose(EquiVault vault, address[] memory assets, uint16[] memory weights) internal {
         vm.prank(manager);
-        vault.proposeReallocation(assets, weights, cap);
+        vault.proposeReallocation(assets, weights);
     }
 
     function _executeReallocation(EquiVault vault, uint256[] memory sellMinOuts, uint256[] memory buyMinOuts)
@@ -184,24 +178,19 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     // Construction
     // ------------------------------------------------------------------
 
-    function testConstructorRejectsInvalidTimelockAndCap() public {
+    function testConstructorRejectsInvalidTimelock() public {
         address[] memory a = _assetsAB();
         uint16[] memory w = _weights(6_000, 4_000);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(0)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 0, 1_000_000e6, 0, 0);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 0, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(8 days)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 8 days, 1_000_000e6, 0, 0);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 8 days, 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(1 days)));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 1 days, 1_000_000e6, 0, 0);
+        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 1 days, 0, 0);
 
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, uint256(0), BOUND_AB));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, 0, 0, 0);
-
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, BOUND_AB + 1, BOUND_AB));
-        new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Delayed, 1 days, BOUND_AB + 1, 0, 0);
     }
 
     // ------------------------------------------------------------------
@@ -209,12 +198,12 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     // ------------------------------------------------------------------
 
     function testInstantProposalExecutableImmediately() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
         enterVault(vault, 1_000e6, alice);
 
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 id = vault.activeProposal().id;
         // No warp: executable right away, and permissionless (executed by alice, not the manager).
         vm.prank(alice);
@@ -226,13 +215,12 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertEq(assets[1], address(tokenC));
         assertEq(vault.basketWeightsBps()[0], 5_000);
         assertEq(vault.basketWeightsBps()[1], 5_000);
-        assertEq(vault.capAum(), 1_500_000e6);
         assertEq(vault.activeProposal().id, 0);
     }
 
     function testDelayedProposalNotExecutableBeforeDelay() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
 
         EquiVault.ReallocationProposal memory p = vault.activeProposal();
         assertEq(p.id, 1);
@@ -248,11 +236,11 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testImmutableVaultRefusesProposalsForever() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Immutable, 0, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Immutable, 0);
 
         vm.expectRevert(EquiVault.TimelockImmutable.selector);
         vm.prank(manager);
-        vault.proposeReallocation(_assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        vault.proposeReallocation(_assetsAC(), _weights(5_000, 5_000));
 
         // Composition is frozen, but ordinary deposits still work.
         _fundAndApprove(address(vault), alice, 1_000e6);
@@ -266,17 +254,17 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     // ------------------------------------------------------------------
 
     function testOnlyManagerCanProposeAndCancel() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
 
         vm.expectRevert(EquiVault.NotManager.selector);
         vm.prank(alice);
-        vault.proposeReallocation(_assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        vault.proposeReallocation(_assetsAC(), _weights(5_000, 5_000));
 
         vm.expectRevert(EquiVault.NoActiveProposal.selector);
         vm.prank(manager);
         vault.cancelReallocation(0);
 
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 reallocationId = vault.activeProposal().id;
         vm.expectRevert(EquiVault.NotManager.selector);
         vm.prank(alice);
@@ -307,23 +295,23 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testSecondProposalRejectedWhileActive() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalAlreadyActive.selector, uint256(1)));
         vm.prank(manager);
-        vault.proposeReallocation(_assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        vault.proposeReallocation(_assetsAC(), _weights(5_000, 5_000));
     }
 
     function testReplaceRestartsFullDelay() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 id = vault.activeProposal().id;
         vm.prank(manager);
         vault.cancelReallocation(id);
 
         vm.warp(block.timestamp + 12 hours); // inside the original window
-        _propose(vault, _assetsAB(), _weights(6_000, 4_000), 1_100_000e6);
+        _propose(vault, _assetsAB(), _weights(6_000, 4_000));
 
         EquiVault.ReallocationProposal memory p = vault.activeProposal();
         assertEq(p.id, 2); // fresh identifier
@@ -331,18 +319,18 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testExecuteWithoutProposalReverts() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         vm.expectRevert(EquiVault.NoActiveProposal.selector);
         vault.executeReallocation(0, type(uint256).max, new uint256[](0), new uint256[](0));
     }
 
     function testCancellationRejectsStaleReallocationIdAfterReplacement() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 staleId = vault.activeProposal().id;
         vm.prank(manager);
         vault.cancelReallocation(staleId);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 replacementId = vault.activeProposal().id;
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, replacementId, uint256(0)));
@@ -358,7 +346,6 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertEq(vault.basketAssets()[1], address(tokenB));
         assertEq(vault.basketWeightsBps()[0], 6_000);
         assertEq(vault.basketWeightsBps()[1], 4_000);
-        assertEq(vault.capAum(), 1_000_000e6);
 
         vm.expectEmit(true, true, false, true);
         emit EquiVault.ReallocationCancelled(replacementId);
@@ -369,44 +356,40 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertEq(vault.basketAssets()[1], address(tokenB));
         assertEq(vault.basketWeightsBps()[0], 6_000);
         assertEq(vault.basketWeightsBps()[1], 4_000);
-        assertEq(vault.capAum(), 1_000_000e6);
     }
 
     function testExecutionRejectsStaleReallocationIdAfterReplacement() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 staleId = vault.activeProposal().id;
         vm.prank(manager);
         vault.cancelReallocation(staleId);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(2), staleId));
         vault.executeReallocation(staleId, type(uint256).max, new uint256[](0), new uint256[](0));
 
         assertEq(vault.activeProposal().id, 2);
         assertEq(vault.basketAssets()[1], address(tokenB));
-        assertEq(vault.capAum(), 1_000_000e6);
     }
 
     function testReallocationExecutionDeadlineBoundaries() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 id = vault.activeProposal().id;
 
         vm.expectRevert(abi.encodeWithSelector(EquiVault.DeadlineExpired.selector, block.timestamp));
         vault.executeReallocation(id, block.timestamp - 1, new uint256[](0), new uint256[](0));
         assertEq(vault.activeProposal().id, id);
         assertEq(vault.basketAssets()[1], address(tokenB));
-        assertEq(vault.capAum(), 1_000_000e6);
 
         vm.prank(alice);
         vault.executeReallocation(id, block.timestamp, new uint256[](0), new uint256[](0));
         assertEq(vault.activeProposal().id, 0);
         assertEq(vault.basketAssets()[1], address(tokenC));
-        assertEq(vault.capAum(), 1_500_000e6);
 
-        EquiVault laterVault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
-        _propose(laterVault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault laterVault = _deployVault(EquiVault.TimelockMode.Instant, 0);
+        _propose(laterVault, _assetsAC(), _weights(5_000, 5_000));
         uint256 laterId = laterVault.activeProposal().id;
         vm.prank(bob);
         laterVault.executeReallocation(laterId, block.timestamp + 1, new uint256[](0), new uint256[](0));
@@ -415,8 +398,8 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testExecutedProposalsCannotBeExecutedOrCancelled() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 reallocationId = vault.activeProposal().id;
         vault.executeReallocation(reallocationId, type(uint256).max, new uint256[](0), new uint256[](0));
 
@@ -439,7 +422,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testCancellationRejectsStaleParameterIdAfterReplacement() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         vm.prank(manager);
         vault.proposeParameters(500, 50);
         uint256 staleId = vault.activeParameterProposal().id;
@@ -471,7 +454,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testExecutionRejectsStaleParameterIdAfterReplacement() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         vm.prank(manager);
         vault.proposeParameters(500, 50);
         uint256 staleId = vault.activeParameterProposal().id;
@@ -489,7 +472,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testParameterUpdateExecutionDeadlineBoundaries() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         vm.prank(manager);
         vault.proposeParameters(500, 50);
         uint256 id = vault.activeParameterProposal().id;
@@ -506,7 +489,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertEq(vault.driftThresholdBps(), 500);
         assertEq(vault.rebalanceSlippageBps(), 50);
 
-        EquiVault laterVault = _deployVault(EquiVault.TimelockMode.Instant, 0, 1_000_000e6);
+        EquiVault laterVault = _deployVault(EquiVault.TimelockMode.Instant, 0);
         vm.prank(manager);
         laterVault.proposeParameters(600, 75);
         uint256 laterId = laterVault.activeParameterProposal().id;
@@ -518,23 +501,23 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testProposalEventsEmitFullHistory() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         address[] memory assets = _assetsAC();
         uint16[] memory weights = _weights(5_000, 5_000);
 
         vm.expectEmit(true, true, true, true);
-        emit EquiVault.ReallocationProposed(1, manager, block.timestamp + 1 days, assets, weights, 1_500_000e6);
+        emit EquiVault.ReallocationProposed(1, manager, block.timestamp + 1 days, assets, weights);
         vm.prank(manager);
-        vault.proposeReallocation(assets, weights, 1_500_000e6);
+        vault.proposeReallocation(assets, weights);
 
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
         vm.expectEmit(true, true, false, true);
-        emit EquiVault.ReallocationExecuted(1, assets, weights, 1_500_000e6);
+        emit EquiVault.ReallocationExecuted(1, assets, weights);
         _executeReallocation(vault, new uint256[](0), new uint256[](0));
 
         vm.prank(manager);
-        vault.proposeReallocation(assets, weights, 1_500_000e6);
+        vault.proposeReallocation(assets, weights);
         uint256 cancellationId = vault.activeProposal().id;
         vm.expectEmit(true, true, false, true);
         emit EquiVault.ReallocationCancelled(cancellationId);
@@ -547,12 +530,12 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     // ------------------------------------------------------------------
 
     function testProposeRejectsInvalidTargets() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
 
         // Weight below the 5 % floor.
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidWeight.selector, uint16(100)));
         vm.prank(manager);
-        vault.proposeReallocation(_assetsAB(), _weights(100, 9_900), 1_000_000e6);
+        vault.proposeReallocation(_assetsAB(), _weights(100, 9_900));
 
         // Weights not summing to 100 %.
         uint16[] memory partialW = new uint16[](1);
@@ -561,7 +544,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         onlyA[0] = address(tokenA);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.WeightsMustSumTo10000.selector, uint256(5_000)));
         vm.prank(manager);
-        vault.proposeReallocation(onlyA, partialW, 1_000_000e6);
+        vault.proposeReallocation(onlyA, partialW);
 
         // Settlement asset in basket.
         address[] memory withUsdc = new address[](2);
@@ -569,7 +552,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         withUsdc[1] = address(tokenA);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.SettlementAssetInBasket.selector, address(usdc)));
         vm.prank(manager);
-        vault.proposeReallocation(withUsdc, _weights(5_000, 5_000), 1_000_000e6);
+        vault.proposeReallocation(withUsdc, _weights(5_000, 5_000));
 
         // Asset not admissible (unregistered).
         address[] memory unknown = new address[](1);
@@ -578,28 +561,17 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         full[0] = 10_000;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.AssetNotAdmissible.selector, address(0xBEEF)));
         vm.prank(manager);
-        vault.proposeReallocation(unknown, full, 1_000_000e6);
-
-        // Cap above the registry-derived bound.
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, BOUND_AB + 1, BOUND_AB));
-        vm.prank(manager);
-        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), BOUND_AB + 1);
-
-        // Zero cap.
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, uint256(0), BOUND_AB));
-        vm.prank(manager);
-        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 0);
-    }
+        vault.proposeReallocation(unknown, full);    }
 
     // ------------------------------------------------------------------
     // Deposit consent during notice
     // ------------------------------------------------------------------
 
     function testDepositRequiresExactProposalConsent() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         _fundAndApprove(address(vault), alice, 1_000e6);
         _fundAndApprove(address(vault), bob, 1_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
 
         // A zero proposal id is refused while a proposal is pending.
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalIdMismatch.selector, uint256(1), uint256(0)));
@@ -626,12 +598,12 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testMixedExitsAllowedDuringNotice() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
         enterVault(vault, 1_000e6, alice);
 
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
 
         // Mixed exit (A -> USDC, B -> token) during the notice succeeds without protocol exit fees.
         bool[] memory flags = new bool[](2);
@@ -650,7 +622,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     // ------------------------------------------------------------------
 
     function testMigrationSellsRemovedAndBuysAdded() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
         enterVault(vault, 1_000e6, alice);
@@ -660,7 +632,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         assertGt(balA, 0);
         assertGt(balB, 0);
 
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
         _executeReallocation(vault, new uint256[](0), new uint256[](0));
@@ -674,7 +646,6 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         // New basket and cap applied.
         assertEq(vault.basketAssets()[0], address(tokenA));
         assertEq(vault.basketAssets()[1], address(tokenC));
-        assertEq(vault.capAum(), 1_500_000e6);
 
         // New liquidity route approved for both legs.
         assertEq(usdc.allowance(address(vault), address(poolC)), type(uint256).max);
@@ -693,8 +664,8 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testReexecutionRevalidatesTarget() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_500_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         uint256 id = vault.activeProposal().id;
 
         // Asset C becomes non-admissible before execution: the execute must refuse.
@@ -707,7 +678,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testReallocationRejectsTooPermissiveSellAndBuyMins() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
         enterVault(vault, 1_000e6, alice);
@@ -716,7 +687,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         onlyA[0] = address(tokenA);
         uint16[] memory fullWeight = new uint16[](1);
         fullWeight[0] = 10_000;
-        _propose(vault, onlyA, fullWeight, 1_000_000e6);
+        _propose(vault, onlyA, fullWeight);
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
         uint256 id = vault.activeProposal().id;
@@ -732,12 +703,12 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     }
 
     function testReallocationRejectsTooPermissiveBuyMin() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
         enterVault(vault, 1_000e6, alice);
 
-        _propose(vault, _assetsAC(), _weights(5_000, 5_000), 1_000_000e6);
+        _propose(vault, _assetsAC(), _weights(5_000, 5_000));
         vm.warp(block.timestamp + 1 days);
         _refreshPrices();
         uint256[] memory permissiveBuy = new uint256[](2);
@@ -747,70 +718,32 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         vault.executeReallocation(id, type(uint256).max, new uint256[](0), permissiveBuy);
     }
 
-    // ------------------------------------------------------------------
-    // AUM cap
-    // ------------------------------------------------------------------
+    function testLargeDepositsRemainBacked() public {
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
 
-    function testAumCapBlocksDepositsAtBoundary() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000e6);
-        _fundAndApprove(address(vault), alice, 1_000e6);
-        _fundAndApprove(address(vault), bob, 1_000e6);
+        // Keep the vault's 1 % default slippage unchanged while adding enough route liquidity
+        // for a 2.1M settlement deposit. At the 60/40 target weights, token A receives >1.2M
+        // settlement value, exceeding the removed per-asset exposure ceiling.
+        usdc.mint(address(this), 600_000_000e6);
+        tokenA.mint(address(this), 3_000_000e18);
+        tokenB.mint(address(this), 6_000_000e6);
+        poolA.seed(300_000_000e6, 3_000_000e18);
+        poolB.seed(300_000_000e6, 6_000_000e6);
+
+        _fundAndApprove(address(vault), alice, 2_100_000e6);
+        vm.prank(alice);
+        enterVault(vault, 2_100_000e6, alice);
+
+        uint256 shares = vault.balanceOf(alice);
+        assertGt(shares, 0);
+        assertGt(vault.totalAssets(), 2_000_000e6);
+        assertGt(_valueUsdc(address(tokenA), tokenA.balanceOf(address(vault))), 1_200_000e6);
 
         vm.prank(alice);
-        enterVault(vault, 900e6, alice);
-        assertLt(vault.totalAssets(), 1_000e6);
-
-        uint256 navBefore = vault.totalAssets();
-        vm.expectRevert();
-        vm.prank(bob);
-        enterVault(vault, 150e6, bob);
-    }
-
-    function testCapDecreaseBelowNavBlocksDeposits() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000e6);
-        _fundAndApprove(address(vault), alice, 1_000e6);
-        _fundAndApprove(address(vault), bob, 1_000e6);
-        vm.prank(alice);
-        enterVault(vault, 800e6, alice);
-
-        // Cap-only reallocation: same basket, lower cap, via the timelock.
-        _propose(vault, _assetsAB(), _weights(6_000, 4_000), 700e6);
-        vm.warp(block.timestamp + 1 days);
-        _refreshPrices();
-        _executeReallocation(vault, new uint256[](0), new uint256[](0));
-        assertEq(vault.capAum(), 700e6);
-
-        // NAV (~800e6) is above the new cap: deposits are refused, no forced withdrawal.
-        vm.expectRevert();
-        vm.prank(bob);
-        enterVault(vault, 100e6, bob);
-        uint256 aliceShares = vault.balanceOf(alice);
-        vm.prank(alice);
-        exitVault(vault, aliceShares, alice, new bool[](0));
+        exitVault(vault, shares, alice, new bool[](2));
         assertEq(vault.balanceOf(alice), 0);
-    }
-
-    function testCapIncreaseAfterExecutionAllowsMoreDeposits() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, 1_000e6);
-        _fundAndApprove(address(vault), alice, 1_000e6);
-        _fundAndApprove(address(vault), bob, 1_000e6);
-        vm.prank(alice);
-        enterVault(vault, 900e6, alice);
-
-        // Raising the cap (same basket) takes effect only after the timelock elapses.
-        _propose(vault, _assetsAB(), _weights(6_000, 4_000), 1_100e6);
-        vm.expectRevert();
-        vm.prank(bob);
-        enterVault(vault, 150e6, bob); // still capped under the old cap
-
-        vm.warp(block.timestamp + 1 days);
-        _refreshPrices();
-        _executeReallocation(vault, new uint256[](0), new uint256[](0));
-        assertEq(vault.capAum(), 1_100e6);
-
-        vm.prank(bob);
-        enterVault(vault, 150e6, bob);
-        assertGt(vault.balanceOf(bob), 0);
+        assertGt(tokenA.balanceOf(alice), 0);
+        assertGt(tokenB.balanceOf(alice), 0);
     }
 
     // ------------------------------------------------------------------
@@ -819,7 +752,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
     // ------------------------------------------------------------------
 
     function testReallocationToSmallerBasketReinvestsFreedSettlement() public {
-        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days, BOUND_AB);
+        EquiVault vault = _deployVault(EquiVault.TimelockMode.Delayed, 1 days);
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
         enterVault(vault, 1_000e6, alice);
@@ -830,7 +763,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         uint16[] memory weights = new uint16[](1);
         weights[0] = 10_000;
         vm.prank(manager);
-        vault.proposeReallocation(target, weights, 1_000_000e6);
+        vault.proposeReallocation(target, weights);
         vm.warp(block.timestamp + 1 days + 1);
         _refreshPrices();
 
@@ -861,7 +794,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         w3[1] = 3_000;
         w3[2] = 2_000;
         EquiVault vault = new EquiVault(
-            usdc, registry, manager, a3, w3, 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0
+            usdc, registry, manager, a3, w3, 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 0, 0
         );
         _fundAndApprove(address(vault), alice, 1_000e6);
         vm.prank(alice);
@@ -872,7 +805,7 @@ function exitVault(EquiVault vault, uint256 shares, address receiver, bool[] mem
         target[1] = address(tokenC);
         uint16[] memory weights = _weights(5_000, 5_000);
         vm.prank(manager);
-        vault.proposeReallocation(target, weights, 1_000_000e6);
+        vault.proposeReallocation(target, weights);
         vm.warp(block.timestamp + 1 days + 1);
         _refreshPrices();
 

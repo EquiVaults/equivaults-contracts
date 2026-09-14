@@ -22,8 +22,7 @@ import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 /// realized gain (0-20 %, immutable) is charged only at withdrawal, 90 % to the manager and 10 %
 /// to the protocol treasury. If both price sources of any basket asset fail, this vault pauses.
 /// The trust mode (instant, delayed 1-7 days, or immutable) is chosen at creation and frozen: it
-/// gates single reallocation proposals that change the basket assets/weights and the AUM cap
-/// (`capAum`, bounded by the registry exposure caps), executed by anyone after the delay with the
+/// gates single reallocation proposals that change the basket assets/weights, executed by anyone after the delay with
 /// positions migrated through the registered liquidity routes. The vault intentionally does not
 /// implement ERC-4626: entries and exits perform several swaps and therefore require explicit
 /// execution constraints rather than ERC-4626's single-asset preview semantics.
@@ -67,7 +66,6 @@ contract EquiVault is ERC20, ReentrancyGuard {
         uint256 executableAt;
         address[] assets;
         uint16[] weightsBps;
-        uint256 capAum;
     }
 
     /// @dev Single active rebalance-parameter proposal; `id == 0` means none pending. Mutually
@@ -117,11 +115,6 @@ contract EquiVault is ERC20, ReentrancyGuard {
     address[] private _basketAssets;
     uint16[] private _basketWeightsBps;
 
-    /// @notice Maximum vault value (settlement-asset units) before new deposits are refused.
-    /// @dev Bounded by `registry.maxVaultAum` (minimum over the basket); changes only through a
-    /// reallocation proposal executed via the vault timelock.
-    uint256 public capAum;
-
     uint256 public proposalCounter;
     ReallocationProposal internal _activeProposal;
 
@@ -154,8 +147,6 @@ contract EquiVault is ERC20, ReentrancyGuard {
     error SharesNonTransferable();
     error NotManager();
     error InvalidTimelockDelay(uint256 delay);
-    error InvalidAumCap(uint256 capAum, uint256 bound);
-    error AumCapReached(uint256 navAfter, uint256 capAum);
     error TimelockImmutable();
     error ProposalAlreadyActive(uint256 id);
     error NoActiveProposal();
@@ -196,13 +187,12 @@ contract EquiVault is ERC20, ReentrancyGuard {
         address indexed proposer,
         uint256 executableAt,
         address[] assets,
-        uint16[] weightsBps,
-        uint256 capAum
+        uint16[] weightsBps
     );
 
     event ReallocationCancelled(uint256 indexed id);
 
-    event ReallocationExecuted(uint256 indexed id, address[] assets, uint16[] weightsBps, uint256 capAum);
+    event ReallocationExecuted(uint256 indexed id, address[] assets, uint16[] weightsBps);
 
     event ParameterUpdateProposed(
         uint256 indexed id, uint256 executableAt, uint16 driftThresholdBps, uint16 rebalanceSlippageBps
@@ -233,7 +223,6 @@ contract EquiVault is ERC20, ReentrancyGuard {
         uint16 maxSlippageBps_,
         TimelockMode timelockMode_,
         uint256 timelockDelay_,
-        uint256 capAum_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) ERC20("EquiVault", "EQV") {
@@ -249,24 +238,17 @@ contract EquiVault is ERC20, ReentrancyGuard {
         timelockMode = timelockMode_;
         timelockDelay = timelockDelay_;
 
-        // Settlement asset decimals drive the NAV scale: `priceE18` follows the USD/Chainlink
-        // convention (dollars per whole token at 1e18), so the settlement wei value needs
-        // rescaling. Must be set before `_maxVaultAumBound`, which converts the registry ceiling
-        // to these units.
+        // Settlement asset decimals drive NAV values and are retained for price conversions.
         (bool ok, uint8 tokenDecimals) = SafeERC20.tryGetDecimals(settlementAsset_);
         _settlementDecimals = ok ? tokenDecimals : 18;
-
-        // AUM cap in settlement-asset units, bounded by the registry-derived exposure ceiling.
-        uint256 aumBound = _maxVaultAumBound(assets, weightsBps);
 
         // Remaining creation bounds are validated in InitLib (kept out of this initcode, which
         // VaultFactory embeds, so the factory stays under the EIP-170 code-size limit). 0 means
         // protocol defaults for drift and rebalance slippage.
         (uint16 drift, uint16 rebalanceSlip) = InitLib.validate(
-            manager_, registry_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_, capAum_, aumBound,
+            manager_, registry_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_,
             driftThresholdBps_, rebalanceSlippageBps_
         );
-        capAum = capAum_;
         driftThresholdBps = drift;
         rebalanceSlippageBps = rebalanceSlip;
     }
@@ -307,9 +289,6 @@ contract EquiVault is ERC20, ReentrancyGuard {
         uint256 navBefore = totalAssets();
         _transferIn(_msgSender(), params.settlementIn);
         uint256 valueReceived = _buyBasket(params.settlementIn, params.minAmountsOut);
-        uint256 navAfter = navBefore + valueReceived;
-        if (navAfter > capAum) revert AumCapReached(navAfter, capAum);
-
         shares = valueReceived.mulDiv(supplyBefore + VIRTUAL_SHARES, navBefore + VIRTUAL_ASSETS);
         if (shares == 0 || shares < params.minSharesOut) {
             revert EntrySharesBelowMinimum(shares, params.minSharesOut);
@@ -413,12 +392,12 @@ contract EquiVault is ERC20, ReentrancyGuard {
         return _activeParameterProposal;
     }
 
-    /// @notice Proposes a new basket (assets/weights) and AUM cap, gated by the vault trust mode.
-    /// @dev `assets_` must be 1-5 registered and Active assets, weights each >= 5 % summing to 100 %,
-    /// and `capAum_` bounded by the registry exposure ceiling. A vault in `Immutable` mode refuses
-    /// proposals forever. Only one proposal can be active; replacing requires cancelling first and
+    /// @notice Proposes a new basket (assets/weights), gated by the vault trust mode.
+    /// @dev `assets_` must be 1-5 registered and Active assets, weights each >= 5 % summing to 100 %.
+    /// A vault in `Immutable` mode refuses proposals forever. Only one proposal can be active; replacing requires
+    /// cancelling first and
     /// restarts the full delay.
-    function proposeReallocation(address[] calldata assets_, uint16[] calldata weightsBps_, uint256 capAum_)
+    function proposeReallocation(address[] calldata assets_, uint16[] calldata weightsBps_)
         external
         onlyManager
     {
@@ -426,7 +405,7 @@ contract EquiVault is ERC20, ReentrancyGuard {
         if (_activeProposal.id != 0) revert ProposalAlreadyActive(_activeProposal.id);
         if (_activeParameterProposal.id != 0) revert ProposalAlreadyActive(_activeParameterProposal.id);
 
-        _validateReallocationTarget(assets_, weightsBps_, capAum_);
+        _validateReallocationTarget(assets_, weightsBps_);
 
         uint256 id = ++proposalCounter;
         uint256 executableAt =
@@ -435,10 +414,9 @@ contract EquiVault is ERC20, ReentrancyGuard {
             id: id,
             executableAt: executableAt,
             assets: assets_,
-            weightsBps: weightsBps_,
-            capAum: capAum_
+            weightsBps: weightsBps_
         });
-        emit ReallocationProposed(id, manager, executableAt, assets_, weightsBps_, capAum_);
+        emit ReallocationProposed(id, manager, executableAt, assets_, weightsBps_);
     }
 
     /// @notice Cancels only the reallocation identified by the manager's consent.
@@ -453,7 +431,7 @@ contract EquiVault is ERC20, ReentrancyGuard {
 
     /// @dev Permissionless once `executableAt` is reached. `expectedProposalId` and `deadline`
     /// bind the executor's consent to the displayed proposal and execution window. Re-validates
-    /// the target (asset statuses and registry caps may have changed since propose), then migrates
+    /// the target (asset statuses may have changed since propose), then migrates
     /// the basket: removed assets are sold to the settlement asset and the freed balance is
     /// reinvested toward the new target weights by deficit (kept and added assets alike), so no
     /// settlement is left idle outside `totalAssets()`. Bounded by `sellMinOuts` in removed order
@@ -470,12 +448,11 @@ contract EquiVault is ERC20, ReentrancyGuard {
         if (deadline < block.timestamp) revert DeadlineExpired(block.timestamp);
         if (block.timestamp < proposal.executableAt) revert ProposalNotExecutable(proposal.executableAt);
 
-        _validateReallocationTarget(proposal.assets, proposal.weightsBps, proposal.capAum);
+        _validateReallocationTarget(proposal.assets, proposal.weightsBps);
         _migrateBasket(proposal.assets, proposal.weightsBps, sellMinOuts, buyMinOuts);
 
-        capAum = proposal.capAum;
         delete _activeProposal;
-        emit ReallocationExecuted(proposal.id, proposal.assets, proposal.weightsBps, proposal.capAum);
+        emit ReallocationExecuted(proposal.id, proposal.assets, proposal.weightsBps);
     }
 
     // ---------------------------------------------------------------------
@@ -724,13 +701,12 @@ contract EquiVault is ERC20, ReentrancyGuard {
         if (weightSum != BPS_DENOMINATOR) revert WeightsMustSumTo10000(weightSum);
     }
 
-    /// @dev Rejects a reallocation target whose basket or cap violates the vault rules. Asset
+    /// @dev Rejects a reallocation target whose basket violates the vault rules. Asset
     /// statuses are checked with `canOpenExposure` so a proposal can only target assets the vault
     /// may still open exposure to.
     function _validateReallocationTarget(
         address[] memory assets_,
-        uint16[] memory weightsBps_,
-        uint256 capAum_
+        uint16[] memory weightsBps_
     ) internal view {
         uint256 n = assets_.length;
         if (n == 0 || n > MAX_BASKET_SIZE) revert InvalidBasketSize(n);
@@ -750,26 +726,6 @@ contract EquiVault is ERC20, ReentrancyGuard {
             weightSum += weight;
         }
         if (weightSum != BPS_DENOMINATOR) revert WeightsMustSumTo10000(weightSum);
-
-        uint256 bound = _maxVaultAumBound(assets_, weightsBps_);
-        if (capAum_ == 0 || capAum_ > bound) revert InvalidAumCap(capAum_, bound);
-    }
-
-    /// @dev Minimum over the basket of the registry-derived vault ceiling, converted to
-    /// settlement-asset units (the registry expresses the ceiling in USD at 1e18).
-    function _maxVaultAumBound(address[] memory assets_, uint16[] memory weightsBps_)
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 bound = type(uint256).max;
-        uint256 n = assets_.length;
-        for (uint256 i = 0; i < n; ++i) {
-            uint256 b = registry.maxVaultAum(assets_[i], weightsBps_[i]);
-            b = b.mulDiv(10 ** _settlementDecimals, 1e18);
-            if (b < bound) bound = b;
-        }
-        return bound;
     }
 
     /// @dev Migrates the held basket toward the proposal target: sells removed assets entirely to

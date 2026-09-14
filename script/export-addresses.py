@@ -25,13 +25,15 @@ ANVIL2 = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"  # treasury
 
 ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
-# contractName -> ordered occurrences -> address key (MockToken/MockOracle/MockPool appear
-# several times; the DeployLocal.s.sol deployment order fixes the mapping).
+# contractName -> ordered occurrences -> address key (MockOracle/MockPool appear several times;
+# the DeployLocal.s.sol deployment order fixes the mapping). Tokens are handled separately so the
+# opt-in LOCAL_DEMO NamedMockToken metadata class exports the same tokenA/tokenB address keys.
 ORDERED = {
-    "MockToken": ["settlementAsset", "tokenA", "tokenB"],
     "MockOracle": ["primaryOracleA", "fallbackOracleA", "primaryOracleB", "fallbackOracleB"],
     "MockPool": ["poolA", "poolB"],
 }
+TOKEN_KEYS = ["settlementAsset", "tokenA", "tokenB"]
+TOKEN_CONTRACTS = {"MockToken", "NamedMockToken"}
 SINGLE = {
     "AssetRegistry": "registry",
     "VaultFactory": "factory",
@@ -54,10 +56,22 @@ def main() -> None:
 
     addresses: dict[str, str] = {}
     counters: dict[str, int] = {}
+    token_counter = 0
+    settlement_symbol = "MOCK"
 
-    def take(name: str, addr: str) -> None:
+    def take(name: str, addr: str, arguments=None) -> None:
+        nonlocal token_counter, settlement_symbol
         key = None
-        if name in ORDERED:
+        if name in TOKEN_CONTRACTS:
+            if token_counter == 0 and name == "NamedMockToken":
+                if arguments != ["Demo USDG", "USDG", "6"]:
+                    sys.exit("unexpected named settlement constructor arguments")
+                settlement_symbol = "USDG"
+            if token_counter >= len(TOKEN_KEYS):
+                sys.exit(f"too many local token deployments ({name})")
+            key = TOKEN_KEYS[token_counter]
+            token_counter += 1
+        elif name in ORDERED:
             i = counters.get(name, 0)
             if i >= len(ORDERED[name]):
                 sys.exit(f"too many {name} deployments")
@@ -72,12 +86,12 @@ def main() -> None:
 
     for tx in run["transactions"]:
         if tx.get("transactionType") in ("CREATE", "CREATE2") and tx.get("contractAddress"):
-            take(tx["contractName"], tx["contractAddress"])
+            take(tx["contractName"], tx["contractAddress"], tx.get("arguments"))
         for extra in tx.get("additionalContracts") or []:
             if extra.get("transactionType") == "CREATE" and extra.get("address"):
                 take(extra["contractName"], extra["address"])
 
-    required = list(ORDERED.values()) + [v for v in SINGLE.values()]
+    required = [TOKEN_KEYS] + list(ORDERED.values()) + [v for v in SINGLE.values()]
     required = [k for group in required for k in (group if isinstance(group, list) else [group])]
     missing = [k for k in required if k not in addresses]
     if missing:
@@ -99,7 +113,7 @@ def main() -> None:
         "admin": ANVIL0,
         "treasury": ANVIL2,
         "manager": ANVIL1,
-        "settlementSymbol": "MOCK",
+        "settlementSymbol": settlement_symbol,
         "settlementDecimals": 6,
         **addresses,
     }

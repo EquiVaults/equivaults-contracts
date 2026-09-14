@@ -63,7 +63,6 @@ contract ForkRobinhoodTest is Test {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
     uint256 internal constant PRICE_A = 100e18;
     uint256 internal constant PRICE_B = 50e18;
-    uint256 internal constant EXPOSURE_CAP = 1_200_000e18;
 
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
@@ -106,8 +105,8 @@ contract ForkRobinhoodTest is Test {
         _fundUsdg(address(routeB), 1_000_000e6);
 
         vm.startPrank(admin);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), MAX_PRICE_AGE);
         vm.stopPrank();
     }
 
@@ -119,7 +118,7 @@ contract ForkRobinhoodTest is Test {
         w[0] = 6_000;
         w[1] = 4_000;
         vault = new EquiVault(
-            MockToken(USDG), registry, manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0
+            MockToken(USDG), registry, manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0
         );
     }
 

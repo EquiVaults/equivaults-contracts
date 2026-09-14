@@ -11,7 +11,7 @@ import {EquiVault} from "./EquiVault.sol";
 /// on Robinhood Chain per the 2026-08-05 decision; any ERC-20 on other EVM chains — multichain
 /// decision of 2026-08-06: the chain is a configuration layer, never a code layer). `createVault`
 /// only admits assets the registry currently opens exposure to, fixes manager, trust mode,
-/// timelock, performance fee, max slippage, drift, rebalance slippage and AUM cap within their
+/// timelock, performance fee, max slippage, drift and rebalance slippage within their
 /// bounds at creation, and records the vault in a public registry the frontend can enumerate
 /// without a backend. The chain id is exposed for indexers; no signature scheme is used yet, so no
 /// EIP-712 domain is needed — any future signature scheme MUST include the chain id in its domain
@@ -43,8 +43,7 @@ contract VaultFactory {
         uint16 feeBps,
         uint16 maxSlippageBps,
         uint16 driftThresholdBps,
-        uint16 rebalanceSlippageBps,
-        uint256 capAum
+        uint16 rebalanceSlippageBps
     );
 
     constructor(IERC20 settlementAsset_, AssetRegistry registry_) {
@@ -62,7 +61,6 @@ contract VaultFactory {
     /// @param maxSlippageBps_ Immutable max swap slippage bound (0.1-30 %).
     /// @param timelockMode_ Instant / Delayed (1-7 days) / Immutable, frozen forever.
     /// @param timelockDelay_ Delay used by Delayed mode, otherwise must be 0.
-    /// @param capAum_ AUM cap in settlement units, bounded by the registry exposure ceilings.
     /// @param driftThresholdBps_ Rebalance drift threshold (1-10 points; 0 = default 3).
     /// @param rebalanceSlippageBps_ Collective rebalance slippage (0.1-3 %; 0 = default 1 %).
     /// @return vault Address of the deployed EquiVault.
@@ -74,19 +72,18 @@ contract VaultFactory {
         uint16 maxSlippageBps_,
         EquiVault.TimelockMode timelockMode_,
         uint256 timelockDelay_,
-        uint256 capAum_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) external returns (address vault) {
         // Only assets the registry currently admits may enter a new basket; the EquiVault
         // constructor then enforces the remaining bounds (basket size, weights, fee, slippage,
-        // timelock, AUM cap, drift and rebalance slippage) with specific errors.
+        // timelock, drift and rebalance slippage) with specific errors.
         uint256 n = assets_.length;
         for (uint256 i = 0; i < n; ++i) {
             if (!registry.canOpenExposure(assets_[i])) revert AssetNotAdmissible(assets_[i]);
         }
 
-        vault = _deploy(manager_, assets_, weightsBps_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_, capAum_,
+        vault = _deploy(manager_, assets_, weightsBps_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_,
             driftThresholdBps_, rebalanceSlippageBps_);
         _vaults.push(vault);
         _created[vault] = true;
@@ -96,7 +93,7 @@ contract VaultFactory {
         EquiVault v = EquiVault(vault);
         emit VaultCreated(
             vault, manager_, address(settlementAsset), block.chainid, v.timelockMode(), v.timelockDelay(), v.feeBps(),
-            v.maxSlippageBps(), v.driftThresholdBps(), v.rebalanceSlippageBps(), v.capAum()
+            v.maxSlippageBps(), v.driftThresholdBps(), v.rebalanceSlippageBps()
         );
     }
 
@@ -109,7 +106,6 @@ contract VaultFactory {
         uint16 maxSlippageBps_,
         EquiVault.TimelockMode timelockMode_,
         uint256 timelockDelay_,
-        uint256 capAum_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) private returns (address vault) {
@@ -124,7 +120,6 @@ contract VaultFactory {
                 maxSlippageBps_,
                 timelockMode_,
                 timelockDelay_,
-                capAum_,
                 driftThresholdBps_,
                 rebalanceSlippageBps_
             )

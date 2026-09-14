@@ -9,6 +9,7 @@ import {RebalanceEngine} from "../src/RebalanceEngine.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
 
 import {MockOracle, MockPool, MockToken} from "../test/mocks/Mocks.sol";
+import {NamedMockToken} from "./LocalDemoTokens.sol";
 
 /// @notice Deploys a self-contained local dev environment on Anvil (chainId 31337):
 /// mock settlement token (6 decimals, USDG-like), two basket assets with oracle + liquidity
@@ -25,7 +26,6 @@ contract DeployLocal is Script {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
     uint256 internal constant PRICE_A = 100e18; // $100 per whole token
     uint256 internal constant PRICE_B = 50e18; // $50 per whole token
-    uint256 internal constant EXPOSURE_CAP = 1_000_000e18; // registry ceiling per asset (USD, 1e18)
 
     // Canonical Anvil default accounts ("test test test test test test test test test test test junk").
     address internal constant ANVIL0 = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266; // broadcaster / registry admin
@@ -41,7 +41,7 @@ contract DeployLocal is Script {
 
     MockToken internal settlement; // 6 decimals, USDG-like
     MockToken internal tokenA; // 18 decimals
-    MockToken internal tokenB; // 6 decimals
+    MockToken internal tokenB; // 6 decimals by default, 8 in LOCAL_DEMO mode
     MockOracle internal primaryA;
     MockOracle internal fallbackA;
     MockOracle internal primaryB;
@@ -55,23 +55,34 @@ contract DeployLocal is Script {
 
     function run() public {
         require(block.chainid == 31337, "DeployLocal: expected Anvil chainId 31337");
+        bool localDemo = vm.envOr("LOCAL_DEMO", false);
 
         vm.startBroadcast();
 
         // --- Tokens ---
-        settlement = new MockToken(6);
-        tokenA = new MockToken(18);
-        tokenB = new MockToken(6);
+        if (localDemo) {
+            settlement = new NamedMockToken("Demo USDG", "USDG", 6);
+            tokenA = MockToken(address(new NamedMockToken("Demo Ether", "ETH", 18)));
+            tokenB = MockToken(address(new NamedMockToken("Demo Bitcoin", "BTC", 8)));
+        } else {
+            settlement = new MockToken(6);
+            tokenA = new MockToken(18);
+            tokenB = new MockToken(6);
+        }
 
         // --- Oracles ---
         primaryA = new MockOracle();
         fallbackA = new MockOracle();
         primaryB = new MockOracle();
         fallbackB = new MockOracle();
-        primaryA.setPrice(PRICE_A, block.timestamp);
-        fallbackA.setPrice(99e18, block.timestamp);
-        primaryB.setPrice(PRICE_B, block.timestamp);
-        fallbackB.setPrice(49e18, block.timestamp);
+        uint256 priceA = localDemo ? 2_500e18 : PRICE_A;
+        uint256 fallbackPriceA = localDemo ? 2_490e18 : 99e18;
+        uint256 priceB = localDemo ? 65_000e18 : PRICE_B;
+        uint256 fallbackPriceB = localDemo ? 64_800e18 : 49e18;
+        primaryA.setPrice(priceA, block.timestamp);
+        fallbackA.setPrice(fallbackPriceA, block.timestamp);
+        primaryB.setPrice(priceB, block.timestamp);
+        fallbackB.setPrice(fallbackPriceB, block.timestamp);
 
         // --- Liquidity routes (constant-product pools) ---
         poolA = new MockPool(settlement, tokenA, 30);
@@ -79,8 +90,8 @@ contract DeployLocal is Script {
 
         // --- Registry (admin = ANVIL0, the broadcast sender) ---
         registry = new AssetRegistry(ANVIL0, ANVIL2);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), MAX_PRICE_AGE);
 
         // --- Factory + example vault + rebalance engine ---
         factory = new VaultFactory(settlement, registry);
@@ -92,22 +103,24 @@ contract DeployLocal is Script {
             300, // maxSlippageBps 3 %
             EquiVault.TimelockMode.Delayed,
             1 days,
-            1_000_000e6, // capAum
             0, // driftThresholdBps -> protocol default (300)
             0 // rebalanceSlippageBps -> protocol default (100)
         );
         engine = new RebalanceEngine();
 
         // --- Seed pools (funds held by ANVIL0, the msg.sender of every broadcast tx) ---
-        settlement.mint(ANVIL0, 20_000_000e6);
-        tokenA.mint(ANVIL0, 100_000e18);
-        tokenB.mint(ANVIL0, 200_000e6);
+        uint256 poolLiquidity = localDemo ? 50_000_000e6 : 10_000_000e6;
+        settlement.mint(ANVIL0, localDemo ? 100_000_000e6 : 20_000_000e6);
+        uint256 tokenALiquidity = localDemo ? 20_000e18 : 100_000e18;
+        uint256 tokenBLiquidity = localDemo ? 769_230_76923 : 200_000e6;
+        tokenA.mint(ANVIL0, tokenALiquidity);
+        tokenB.mint(ANVIL0, tokenBLiquidity);
         settlement.approve(address(poolA), type(uint256).max);
         settlement.approve(address(poolB), type(uint256).max);
         tokenA.approve(address(poolA), type(uint256).max);
         tokenB.approve(address(poolB), type(uint256).max);
-        poolA.seed(10_000_000e6, 100_000e18);
-        poolB.seed(10_000_000e6, 200_000e6);
+        poolA.seed(poolLiquidity, tokenALiquidity);
+        poolB.seed(poolLiquidity, tokenBLiquidity);
 
         // --- Fund every canonical Anvil account with settlement for frontend testing ---
         _fund(ANVIL0);

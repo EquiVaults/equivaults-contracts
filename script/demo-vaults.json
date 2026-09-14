@@ -1,0 +1,41 @@
+{
+  "schema": "equivaults-local-demo-catalog/v1",
+  "assets": [
+    {"key": "ETH", "name": "Demo Ether", "symbol": "ETH", "decimals": 18, "primaryPriceE18": "2500000000000000000000", "fallbackPriceE18": "2490000000000000000000"},
+    {"key": "BTC", "name": "Demo Bitcoin", "symbol": "BTC", "decimals": 8, "primaryPriceE18": "65000000000000000000000", "fallbackPriceE18": "64800000000000000000000"},
+    {"key": "SOL", "name": "Demo Solana", "symbol": "SOL", "decimals": 9, "primaryPriceE18": "150000000000000000000", "fallbackPriceE18": "149000000000000000000"},
+    {"key": "AVAX", "name": "Demo Avalanche", "symbol": "AVAX", "decimals": 18, "primaryPriceE18": "40000000000000000000", "fallbackPriceE18": "39000000000000000000"},
+    {"key": "LINK", "name": "Demo Chainlink", "symbol": "LINK", "decimals": 18, "primaryPriceE18": "15000000000000000000", "fallbackPriceE18": "14900000000000000000"},
+    {"key": "UNI", "name": "Demo Uniswap", "symbol": "UNI", "decimals": 18, "primaryPriceE18": "10000000000000000000", "fallbackPriceE18": "9900000000000000000"},
+    {"key": "AAVE", "name": "Demo Aave", "symbol": "AAVE", "decimals": 18, "primaryPriceE18": "250000000000000000000", "fallbackPriceE18": "248000000000000000000"},
+    {"key": "ARB", "name": "Demo Arbitrum", "symbol": "ARB", "decimals": 18, "primaryPriceE18": "750000000000000000", "fallbackPriceE18": "740000000000000000"}
+  ],
+  "managers": [
+    {"accountIndex": 1, "name": "Alex Morgan", "description": "Core allocation manager."},
+    {"accountIndex": 4, "name": "Riley Chen", "description": "Risk-managed allocation manager."},
+    {"accountIndex": 5, "name": "Jordan Patel", "description": "Multi-asset allocation manager."},
+    {"accountIndex": 6, "name": "Samira Okafor", "description": "Growth allocation manager."},
+    {"accountIndex": 7, "name": "Casey Nguyen", "description": "Momentum allocation manager."},
+    {"accountIndex": 8, "name": "Taylor Brooks", "description": "Diversified allocation manager."},
+    {"accountIndex": 9, "name": "Morgan Rivera", "description": "Alternative assets manager."}
+  ],
+  "vaults": [
+    {"factoryIndex": 0, "name": "Core ETH / BTC", "description": "Baseline balanced allocation for local integration.", "managerAccountIndex": 1, "assetKeys": ["ETH", "BTC"], "weightsBps": [6000, 4000]},
+    {"factoryIndex": 1, "name": "Ether Conviction", "description": "Single-asset Ether allocation with an active position.", "managerAccountIndex": 1, "assetKeys": ["ETH"], "weightsBps": [10000]},
+    {"factoryIndex": 2, "name": "Bitcoin Reserve", "description": "Delayed Bitcoin reserve with an active investor position.", "managerAccountIndex": 4, "assetKeys": ["BTC"], "weightsBps": [10000]},
+    {"factoryIndex": 3, "name": "Immutable Majors", "description": "Frozen equal-weight majors allocation with no position yet.", "managerAccountIndex": 5, "assetKeys": ["ETH", "BTC"], "weightsBps": [5000, 5000]},
+    {"factoryIndex": 4, "name": "Layer One Blend", "description": "Delayed ETH, BTC and SOL allocation.", "managerAccountIndex": 6, "assetKeys": ["ETH", "BTC", "SOL"], "weightsBps": [4500, 3000, 2500]},
+    {"factoryIndex": 5, "name": "Infrastructure Mix", "description": "Instant SOL, AVAX and LINK allocation.", "managerAccountIndex": 7, "assetKeys": ["SOL", "AVAX", "LINK"], "weightsBps": [4000, 3500, 2500]},
+    {"factoryIndex": 6, "name": "Five Asset Core", "description": "Delayed diversified five-asset allocation.", "managerAccountIndex": 8, "assetKeys": ["ETH", "BTC", "SOL", "AVAX", "LINK"], "weightsBps": [3000, 2500, 2000, 1500, 1000]},
+    {"factoryIndex": 7, "name": "Immutable Ecosystems", "description": "Frozen five-asset allocation waiting for its first deposit.", "managerAccountIndex": 9, "assetKeys": ["UNI", "AAVE", "ARB", "ETH", "BTC"], "weightsBps": [2500, 2000, 1500, 2500, 1500]},
+    {"factoryIndex": 8, "name": "Chainlink Focus", "description": "Delayed LINK allocation with a pending parameter update.", "managerAccountIndex": 4, "assetKeys": ["LINK"], "weightsBps": [10000]},
+    {"factoryIndex": 9, "name": "Avalanche / Uniswap", "description": "Instant two-asset allocation.", "managerAccountIndex": 9, "assetKeys": ["AVAX", "UNI"], "weightsBps": [5500, 4500]},
+    {"factoryIndex": 10, "name": "DeFi Quality", "description": "Delayed AAVE, ARB and ETH allocation.", "managerAccountIndex": 4, "assetKeys": ["AAVE", "ARB", "ETH"], "weightsBps": [3500, 2500, 4000]},
+    {"factoryIndex": 11, "name": "Liquid Crypto Five", "description": "Instant five-asset allocation with an active position.", "managerAccountIndex": 5, "assetKeys": ["BTC", "SOL", "LINK", "UNI", "AAVE"], "weightsBps": [3000, 2000, 2000, 1500, 1500]},
+    {"factoryIndex": 12, "name": "Immutable Arbitrum", "description": "Frozen ARB allocation without a position.", "managerAccountIndex": 6, "assetKeys": ["ARB"], "weightsBps": [10000]},
+    {"factoryIndex": 13, "name": "Ether / Aave", "description": "Delayed two-asset allocation with a pending parameter update.", "managerAccountIndex": 7, "assetKeys": ["ETH", "AAVE"], "weightsBps": [6000, 4000]},
+    {"factoryIndex": 14, "name": "BTC Alternatives", "description": "Instant BTC, AVAX and ARB allocation.", "managerAccountIndex": 8, "assetKeys": ["BTC", "AVAX", "ARB"], "weightsBps": [5000, 3000, 2000]},
+    {"factoryIndex": 15, "name": "Balanced Digital Assets", "description": "Delayed five-asset allocation with an active position.", "managerAccountIndex": 9, "assetKeys": ["ETH", "SOL", "UNI", "AAVE", "ARB"], "weightsBps": [3500, 2000, 1500, 1500, 1500]},
+    {"factoryIndex": 16, "name": "Oracle / DEX Pair", "description": "Frozen LINK and UNI allocation with an active position.", "managerAccountIndex": 4, "assetKeys": ["LINK", "UNI"], "weightsBps": [5000, 5000]}
+  ]
+}

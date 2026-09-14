@@ -50,8 +50,6 @@ contract RebalanceEngineTest is Test {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
     uint256 internal constant PRICE_A = 100e18; // $100 per whole token
     uint256 internal constant PRICE_B = 50e18; // $50 per whole token
-    uint256 internal constant EXPOSURE_CAP = 1_200_000e18;
-    uint256 internal constant BOUND_AB = 2_000_000e6;
 
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
@@ -94,8 +92,8 @@ contract RebalanceEngineTest is Test {
         usdc.mint(address(routeB), 1e30);
 
         vm.startPrank(admin);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), MAX_PRICE_AGE);
         vm.stopPrank();
 
         engine = new RebalanceEngine();
@@ -114,7 +112,7 @@ contract RebalanceEngineTest is Test {
         uint16[] memory w = new uint16[](2);
         w[0] = 6_000;
         w[1] = 4_000;
-        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 300, mode, delay, 1_000_000e6, 0, 0);
+        vault = new EquiVault(usdc, registry, manager, a, w, 1_000, 300, mode, delay, 0, 0);
     }
 
     /// @dev Alice deposits 1,000 USDC, then asset A appreciates 20 % so the basket drifts ~4.3
@@ -194,7 +192,7 @@ contract RebalanceEngineTest is Test {
         w[0] = 6_000;
         w[1] = 4_000;
         EquiVault strictVault =
-            new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+            new EquiVault(usdc, registry, manager, a, w, 1_000, 100, EquiVault.TimelockMode.Instant, 0, 0, 0);
         vm.prank(manager);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidRebalanceSlippage.selector, uint16(150)));
         strictVault.proposeParameters(500, 150);
@@ -244,7 +242,7 @@ contract RebalanceEngineTest is Test {
 
         // A pending basket proposal blocks a parameter proposal...
         vm.prank(manager);
-        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 1_000_000e6);
+        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000));
         uint256 reallocationId = vault.activeProposal().id;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalAlreadyActive.selector, uint256(1)));
         _proposeParameters(vault, 500, 200);
@@ -256,12 +254,12 @@ contract RebalanceEngineTest is Test {
         uint256 parameterId = vault.activeParameterProposal().id;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.ProposalAlreadyActive.selector, uint256(2)));
         vm.prank(manager);
-        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 1_000_000e6);
+        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000));
 
         vm.prank(manager);
         vault.cancelParameterUpdate(parameterId);
         vm.prank(manager);
-        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000), 1_000_000e6);
+        vault.proposeReallocation(_assetsAB(), _weights(6_000, 4_000));
         assertEq(vault.activeProposal().id, 3);
     }
 

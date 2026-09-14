@@ -5,16 +5,13 @@ import {
     AccessControlDefaultAdminRules
 } from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 
 /// @notice Protocol-wide catalogue of assets that vaults may use.
-/// @dev The default admin attests asset compatibility off-chain; this contract enforces configured limits and states.
+/// @dev The default admin attests asset compatibility off-chain; this contract records configured metadata and states.
 contract AssetRegistry is AccessControlDefaultAdminRules {
     uint48 public constant ADMIN_TRANSFER_DELAY = 7 days;
-    uint16 public constant BPS_DENOMINATOR = 10_000;
-
     enum AssetStatus {
         None,
         Active,
@@ -26,7 +23,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
         IPriceOracle primaryOracle;
         IPriceOracle fallbackOracle;
         address liquidityRoute;
-        uint256 exposureCapE18;
         uint48 maxPriceAge;
         uint8 decimals;
         AssetStatus status;
@@ -35,9 +31,7 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
     error AssetAlreadyRegistered(address asset);
     error AssetNotRegistered(address asset);
     error InvalidAddress();
-    error InvalidExposureCap();
     error InvalidPriceAge();
-    error InvalidWeight(uint16 weightBps);
     error InvalidAssetStatus(AssetStatus status);
     error InvalidToken(address asset);
     error PriceUnavailable(address asset, address quote);
@@ -48,12 +42,10 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
         address indexed primaryOracle,
         address indexed fallbackOracle,
         address liquidityRoute,
-        uint256 exposureCapE18,
         uint48 maxPriceAge,
         uint8 decimals
     );
     event AssetStatusUpdated(address indexed asset, AssetStatus status);
-    event ExposureCapUpdated(address indexed asset, uint256 exposureCapE18);
     event DepositsPauseUpdated(bool paused);
     event TreasuryTransferProposed(address indexed treasury, uint48 executableAt);
     event TreasuryTransferExecuted(address indexed previousTreasury, address indexed newTreasury);
@@ -78,7 +70,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
         IPriceOracle primaryOracle,
         IPriceOracle fallbackOracle,
         address liquidityRoute,
-        uint256 exposureCapE18,
         uint48 maxPriceAge
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_assets[asset].status != AssetStatus.None) revert AssetAlreadyRegistered(asset);
@@ -87,7 +78,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
                 || liquidityRoute == address(0)
         ) revert InvalidAddress();
         if (asset.code.length == 0) revert InvalidToken(asset);
-        if (exposureCapE18 == 0) revert InvalidExposureCap();
         if (maxPriceAge == 0) revert InvalidPriceAge();
 
         uint8 decimals;
@@ -102,7 +92,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
             primaryOracle: primaryOracle,
             fallbackOracle: fallbackOracle,
             liquidityRoute: liquidityRoute,
-            exposureCapE18: exposureCapE18,
             maxPriceAge: maxPriceAge,
             decimals: decimals,
             status: AssetStatus.Active
@@ -113,7 +102,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
             address(primaryOracle),
             address(fallbackOracle),
             liquidityRoute,
-            exposureCapE18,
             maxPriceAge,
             decimals
         );
@@ -132,13 +120,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
         emit AssetStatusUpdated(asset, status);
     }
 
-    function setExposureCap(address asset, uint256 exposureCapE18) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _requireRegistered(asset);
-        if (exposureCapE18 == 0) revert InvalidExposureCap();
-        _assets[asset].exposureCapE18 = exposureCapE18;
-        emit ExposureCapUpdated(asset, exposureCapE18);
-    }
-
     function setDepositsPaused(bool paused) external onlyRole(DEFAULT_ADMIN_ROLE) {
         depositsPaused = paused;
         emit DepositsPauseUpdated(paused);
@@ -151,12 +132,6 @@ contract AssetRegistry is AccessControlDefaultAdminRules {
     function canExit(address asset) external view returns (bool) {
         AssetStatus status = _assets[asset].status;
         return status == AssetStatus.Active || status == AssetStatus.ExitOnly || status == AssetStatus.Quarantined;
-    }
-
-    function maxVaultAum(address asset, uint16 weightBps) external view returns (uint256) {
-        _requireRegistered(asset);
-        if (weightBps == 0 || weightBps > BPS_DENOMINATOR) revert InvalidWeight(weightBps);
-        return Math.mulDiv(_assets[asset].exposureCapE18, BPS_DENOMINATOR, weightBps);
     }
 
     /// @notice Resolves a live price without writing it to storage.

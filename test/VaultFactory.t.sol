@@ -2,7 +2,6 @@
 pragma solidity 0.8.30;
 
 import {Test, Vm} from "forge-std/Test.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {AssetRegistry} from "../src/AssetRegistry.sol";
 import {EquiVault} from "../src/EquiVault.sol";
@@ -11,12 +10,9 @@ import {VaultFactory} from "../src/VaultFactory.sol";
 import {MockOracle, MockPool, MockToken} from "./mocks/Mocks.sol";
 
 contract VaultFactoryTest is Test {
-    using Math for uint256;
-
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
     uint256 internal constant PRICE_A = 100e18; // $100 per whole token
     uint256 internal constant PRICE_B = 50e18; // $50 per whole token
-    uint256 internal constant EXPOSURE_CAP = 1_000_000e18; // registry ceiling per asset, USD at 1e18
 
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
@@ -65,8 +61,8 @@ contract VaultFactoryTest is Test {
 
         registry = new AssetRegistry(admin, treasury);
         vm.startPrank(admin);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), MAX_PRICE_AGE);
         vm.stopPrank();
 
         factory = new VaultFactory(usdc, registry);
@@ -90,11 +86,10 @@ contract VaultFactoryTest is Test {
         return w;
     }
 
-    /// @dev Default creation: fee 10 %, vault slippage 3 %, Delayed 1 day, cap 1M settlement units,
-    /// drift/slippage on protocol defaults.
+    /// @dev Default creation: fee 10 %, vault slippage 3 %, Delayed 1 day, drift/slippage on protocol defaults.
     function _createVault() internal returns (address vault) {
         vault = factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 0, 0
         );
     }
 
@@ -106,7 +101,7 @@ contract VaultFactoryTest is Test {
         address[] memory a = _assetsAB();
         uint16[] memory w = _weightsAB();
         address vault = factory.createVault(
-            manager, a, w, 1_000, 200, EquiVault.TimelockMode.Delayed, 2 days, 500_000e6, 500, 200
+            manager, a, w, 1_000, 200, EquiVault.TimelockMode.Delayed, 2 days, 500, 200
         );
 
         EquiVault v = EquiVault(vault);
@@ -115,7 +110,6 @@ contract VaultFactoryTest is Test {
         assertEq(v.maxSlippageBps(), 200);
         assertEq(uint8(v.timelockMode()), uint8(EquiVault.TimelockMode.Delayed));
         assertEq(v.timelockDelay(), 2 days);
-        assertEq(v.capAum(), 500_000e6);
         assertEq(v.driftThresholdBps(), 500);
         assertEq(v.rebalanceSlippageBps(), 200);
         assertEq(address(v.settlementAsset()), address(usdc));
@@ -135,7 +129,7 @@ contract VaultFactoryTest is Test {
 
     function testImmutableVaultIsFrozenAtCreation() public {
         address vault = factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Immutable, 0, 1_000_000e6, 500, 200
+            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Immutable, 0, 500, 200
         );
         EquiVault v = EquiVault(vault);
         assertEq(uint8(v.timelockMode()), uint8(EquiVault.TimelockMode.Immutable));
@@ -146,7 +140,7 @@ contract VaultFactoryTest is Test {
         v.proposeParameters(600, 100);
         vm.prank(manager);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.TimelockImmutable.selector));
-        v.proposeReallocation(_assetsAB(), _weightsAB(), 1_000_000e6);
+        v.proposeReallocation(_assetsAB(), _weightsAB());
     }
 
     function testProtocolAdminHasNoPowerOverVault() public {
@@ -155,10 +149,10 @@ contract VaultFactoryTest is Test {
         // The protocol admin has no role inside the vault: it cannot propose, cancel or move funds.
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.NotManager.selector));
-        v.proposeReallocation(_assetsAB(), _weightsAB(), 1_000_000e6);
+        v.proposeReallocation(_assetsAB(), _weightsAB());
 
         vm.prank(manager);
-        v.proposeReallocation(_assetsAB(), _weightsAB(), 1_000_000e6);
+        v.proposeReallocation(_assetsAB(), _weightsAB());
         uint256 proposalId = v.activeProposal().id;
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.NotManager.selector));
@@ -175,7 +169,7 @@ contract VaultFactoryTest is Test {
         a[0] = address(0xBEEF);
         w[0] = 10_000;
         vm.expectRevert(abi.encodeWithSelector(VaultFactory.AssetNotAdmissible.selector, address(0xBEEF)));
-        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0);
 
         // An ExitOnly asset is not admissible for new exposure.
         vm.startPrank(admin);
@@ -183,7 +177,7 @@ contract VaultFactoryTest is Test {
         vm.stopPrank();
         vm.expectRevert(abi.encodeWithSelector(VaultFactory.AssetNotAdmissible.selector, address(tokenB)));
         factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0
         );
 
         // A global deposits pause also blocks creation.
@@ -193,7 +187,7 @@ contract VaultFactoryTest is Test {
         vm.stopPrank();
         vm.expectRevert(abi.encodeWithSelector(VaultFactory.AssetNotAdmissible.selector, address(tokenA)));
         factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0
         );
     }
 
@@ -206,7 +200,7 @@ contract VaultFactoryTest is Test {
         w[0] = 6_000;
         w[1] = 4_000;
         vm.expectRevert(abi.encodeWithSelector(VaultFactory.AssetNotAdmissible.selector, address(usdc)));
-        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0);
     }
 
     function testCreateVaultRejectsInvalidParameters() public {
@@ -215,23 +209,23 @@ contract VaultFactoryTest is Test {
 
         // fee above the immutable 20 % cap
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidFee.selector, uint16(2_001)));
-        factory.createVault(manager, a, w, 2_001, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, w, 2_001, 300, EquiVault.TimelockMode.Instant, 0, 0, 0);
 
         // vault slippage must leave room for the 0.1 % minimum rebalance slippage.
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(0)));
-        factory.createVault(manager, a, w, 1_000, 0, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, w, 1_000, 0, EquiVault.TimelockMode.Instant, 0, 0, 0);
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(9)));
-        factory.createVault(manager, a, w, 1_000, 9, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, w, 1_000, 9, EquiVault.TimelockMode.Instant, 0, 0, 0);
 
         // vault slippage above the 30 % cap
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidSlippage.selector, uint16(3_001)));
-        factory.createVault(manager, a, w, 1_000, 3_001, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, w, 1_000, 3_001, EquiVault.TimelockMode.Instant, 0, 0, 0);
 
         // weight below the 5 % floor
         uint16[] memory lowW = _weightsAB();
         lowW[1] = 100;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidWeight.selector, uint16(100)));
-        factory.createVault(manager, a, lowW, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, a, lowW, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0);
 
         // weights not summing to 100 %
         address[] memory one = new address[](1);
@@ -239,24 +233,19 @@ contract VaultFactoryTest is Test {
         uint16[] memory partialW = new uint16[](1);
         partialW[0] = 5_000;
         vm.expectRevert(abi.encodeWithSelector(EquiVault.WeightsMustSumTo10000.selector, uint256(5_000)));
-        factory.createVault(manager, one, partialW, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0);
+        factory.createVault(manager, one, partialW, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0);
 
         // timelock delay outside the 1-7 day window for Delayed mode
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidTimelockDelay.selector, uint256(8 days)));
-        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Delayed, 8 days, 1_000_000e6, 0, 0);
-
-        // AUM cap above the registry-derived ceiling
-        uint256 bound = Math.mulDiv(EXPOSURE_CAP, 10_000, 6_000).mulDiv(1e6, 1e18);
-        vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidAumCap.selector, bound + 1, bound));
-        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, bound + 1, 0, 0);
+        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Delayed, 8 days, 0, 0);
 
         // drift outside the 1-10 point window
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidDriftThreshold.selector, uint16(50)));
-        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 50, 0);
+        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 50, 0);
 
         // collective rebalance slippage above the 3 % cap
         vm.expectRevert(abi.encodeWithSelector(EquiVault.InvalidRebalanceSlippage.selector, uint16(301)));
-        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 301);
+        factory.createVault(manager, a, w, 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 301);
     }
 
     // ------------------------------------------------------------------
@@ -267,15 +256,15 @@ contract VaultFactoryTest is Test {
         // Anyone may create a vault for any manager, paying only the gas.
         vm.prank(alice);
         address v1 = factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Instant, 0, 0, 0
         );
         vm.prank(bob);
         address v2 = factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 500, 300, EquiVault.TimelockMode.Delayed, 2 days, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 500, 300, EquiVault.TimelockMode.Delayed, 2 days, 0, 0
         );
         vm.prank(manager);
         address v3 = factory.createVault(
-            bob, _assetsAB(), _weightsAB(), 2_000, 300, EquiVault.TimelockMode.Immutable, 0, 1_000_000e6, 0, 0
+            bob, _assetsAB(), _weightsAB(), 2_000, 300, EquiVault.TimelockMode.Immutable, 0, 0, 0
         );
 
         assertEq(factory.vaultCount(), 3);
@@ -299,10 +288,10 @@ contract VaultFactoryTest is Test {
     function testVaultCreatedEventCarriesIndexingData() public {
         vm.recordLogs();
         address v1 = factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 0, 0
         );
         address v2 = factory.createVault(
-            manager, _assetsAB(), _weightsAB(), 0, 300, EquiVault.TimelockMode.Instant, 0, 1_000_000e6, 0, 0
+            manager, _assetsAB(), _weightsAB(), 0, 300, EquiVault.TimelockMode.Instant, 0, 0, 0
         );
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -323,9 +312,8 @@ contract VaultFactoryTest is Test {
                 uint16 fee,
                 uint16 maxSlip,
                 uint16 drift,
-                uint16 rebalSlip,
-                uint256 cap
-            ) = abi.decode(logs[i].data, (uint256, uint8, uint256, uint16, uint16, uint16, uint16, uint256));
+                uint16 rebalSlip
+            ) = abi.decode(logs[i].data, (uint256, uint8, uint256, uint16, uint16, uint16, uint16));
             assertEq(chainId, block.chainid);
             assertEq(mode, created == 1 ? uint8(EquiVault.TimelockMode.Delayed) : uint8(EquiVault.TimelockMode.Instant));
             assertEq(delay, created == 1 ? 1 days : 0);
@@ -333,7 +321,6 @@ contract VaultFactoryTest is Test {
             assertEq(maxSlip, 300);
             assertEq(drift, 300);
             assertEq(rebalSlip, 100);
-            assertEq(cap, 1_000_000e6);
 
             // The basket is read live from the vault, never from a stale event snapshot.
             EquiVault v = EquiVault(created == 1 ? v1 : v2);

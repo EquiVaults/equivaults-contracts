@@ -32,7 +32,6 @@ library InitLib {
     error InvalidFee(uint16 feeBps);
     error InvalidSlippage(uint16 slippageBps);
     error InvalidTimelockDelay(uint256 delay);
-    error InvalidAumCap(uint256 capAum, uint256 bound);
     error InvalidDriftThreshold(uint16 driftBps);
     error InvalidRebalanceSlippage(uint16 slippageBps);
 
@@ -45,8 +44,6 @@ library InitLib {
         uint16 maxSlippageBps_,
         EquiVault.TimelockMode timelockMode_,
         uint256 timelockDelay_,
-        uint256 capAum_,
-        uint256 aumBound_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) external pure returns (uint16 driftThresholdBps, uint16 rebalanceSlippageBps) {
@@ -65,8 +62,6 @@ library InitLib {
         } else if (timelockDelay_ != 0) {
             revert InvalidTimelockDelay(timelockDelay_);
         }
-
-        if (capAum_ == 0 || capAum_ > aumBound_) revert InvalidAumCap(capAum_, aumBound_);
 
         if (driftThresholdBps_ != 0) {
             if (driftThresholdBps_ < MIN_DRIFT_BPS || driftThresholdBps_ > MAX_DRIFT_BPS) {

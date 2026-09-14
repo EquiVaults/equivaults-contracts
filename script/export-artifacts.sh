@@ -6,24 +6,57 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+MODE="publish"
+if [ "${1:-}" = "--local" ] && [ "$#" -eq 1 ]; then
+  MODE="local"
+elif [ "$#" -ne 0 ]; then
+  echo "usage: $0 [--local]" >&2
+  exit 2
+fi
+
 CONTRACTS=(AssetRegistry EquiVault IERC20 IPriceOracle ISwapRouter RebalanceEngine VaultFactory)
 STAGE_DIR="$(mktemp -d .artifact-stage.XXXXXX)"
 STAGED_ABI="$STAGE_DIR/abi"
 STAGED_MANIFEST="$STAGE_DIR/manifest.json"
+OUTPUT_ABI="abi"
+OUTPUT_MANIFEST="deployments/manifest.json"
+WORKING_TREE_FINGERPRINT=""
 
 cleanup() {
   rm -rf "$STAGE_DIR"
 }
 trap cleanup EXIT
 
-git diff --quiet || {
-  echo "refusing to publish artifacts from a working tree with uncommitted changes" >&2
-  exit 1
-}
-git diff --cached --quiet || {
-  echo "refusing to publish artifacts from an index with uncommitted changes" >&2
-  exit 1
-}
+if [ "$MODE" = "publish" ]; then
+  git diff --quiet || {
+    echo "refusing to publish artifacts from a working tree with uncommitted changes" >&2
+    exit 1
+  }
+  git diff --cached --quiet || {
+    echo "refusing to publish artifacts from an index with uncommitted changes" >&2
+    exit 1
+  }
+else
+  OUTPUT_ABI=".local-demo/artifacts/abi"
+  OUTPUT_MANIFEST=".local-demo/artifacts/manifest.json"
+  WORKING_TREE_FINGERPRINT="$(python3 - <<'PY'
+import hashlib
+import subprocess
+from pathlib import Path
+
+digest = hashlib.sha256()
+digest.update(subprocess.check_output(["git", "diff", "--binary", "HEAD"]))
+for raw_path in subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0"):
+    if not raw_path:
+        continue
+    path = Path(raw_path.decode())
+    digest.update(raw_path)
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+print(digest.hexdigest())
+PY
+)"
+fi
 forge build
 COMMIT="$(git rev-parse --verify HEAD^{commit})"
 DATE="$(date -u +%Y-%m-%d)"
@@ -50,12 +83,12 @@ print(f"  abi/{sys.argv[2].split('/')[-1]} ({len(abi)} entries)")
 PY
 done
 
-python3 - "$COMMIT" "$DATE" "$STAGED_ABI" "$STAGED_MANIFEST" <<'PY'
+python3 - "$COMMIT" "$DATE" "$STAGED_ABI" "$STAGED_MANIFEST" "$MODE" "$WORKING_TREE_FINGERPRINT" <<'PY'
 import json
 import os
 import sys
 
-commit, date, abi_dir, manifest_path = sys.argv[1:]
+commit, date, abi_dir, manifest_path, mode, fingerprint = sys.argv[1:]
 abi_files = sorted(f for f in os.listdir(abi_dir) if f.endswith(".json"))
 manifest = {
     "schema": "equivaults-integration-artifacts/v1",
@@ -72,24 +105,35 @@ manifest = {
     },
     "note": "Regenerate ABI and manifest after any contract change: ./script/export-artifacts.sh",
 }
+if mode == "local":
+    manifest["localWorkingTree"] = True
+    manifest["source"] = {"baseCommit": commit, "workingTreeFingerprint": fingerprint}
+    manifest["note"] = (
+        "Local working-tree artifacts only; do not publish. Regenerate with: "
+        "./script/export-artifacts.sh --local"
+    )
 with open(manifest_path, "w", encoding="utf-8") as destination:
     json.dump(manifest, destination, indent=2)
     destination.write("\n")
 print(f"  deployments/manifest.json (commit {commit}, {len(abi_files)} ABI files)")
 PY
 
-mkdir -p deployments
-if [ -d abi ]; then
-  mv abi "$STAGE_DIR/previous-abi"
+mkdir -p "$(dirname "$OUTPUT_ABI")" "$(dirname "$OUTPUT_MANIFEST")"
+if [ -d "$OUTPUT_ABI" ]; then
+  mv "$OUTPUT_ABI" "$STAGE_DIR/previous-abi"
 fi
-if [ -f deployments/manifest.json ]; then
-  mv deployments/manifest.json "$STAGE_DIR/previous-manifest.json"
+if [ -f "$OUTPUT_MANIFEST" ]; then
+  mv "$OUTPUT_MANIFEST" "$STAGE_DIR/previous-manifest.json"
 fi
-if ! mv "$STAGED_ABI" abi || ! mv "$STAGED_MANIFEST" deployments/manifest.json; then
-  rm -rf abi deployments/manifest.json
-  [ ! -d "$STAGE_DIR/previous-abi" ] || mv "$STAGE_DIR/previous-abi" abi
-  [ ! -f "$STAGE_DIR/previous-manifest.json" ] || mv "$STAGE_DIR/previous-manifest.json" deployments/manifest.json
+if ! mv "$STAGED_ABI" "$OUTPUT_ABI" || ! mv "$STAGED_MANIFEST" "$OUTPUT_MANIFEST"; then
+  rm -rf "$OUTPUT_ABI" "$OUTPUT_MANIFEST"
+  [ ! -d "$STAGE_DIR/previous-abi" ] || mv "$STAGE_DIR/previous-abi" "$OUTPUT_ABI"
+  [ ! -f "$STAGE_DIR/previous-manifest.json" ] || mv "$STAGE_DIR/previous-manifest.json" "$OUTPUT_MANIFEST"
   exit 1
 fi
 
-echo "Done: abi/ and deployments/manifest.json updated."
+if [ "$MODE" = "local" ]; then
+  echo "Done: local-only ABI and manifest updated under .local-demo/artifacts/."
+else
+  echo "Done: abi/ and deployments/manifest.json updated."
+fi

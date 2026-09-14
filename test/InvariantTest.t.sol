@@ -79,8 +79,6 @@ abstract contract InvariantBase is Test {
     uint256 internal constant PRICE_A = 100e18; // $100 per whole token
     uint256 internal constant PRICE_B = 50e18; // $50 per whole token
     uint256 internal constant PRICE_C = 200e18; // $200 per whole token
-    uint256 internal constant EXPOSURE_CAP = 1_000_000e18; // $1M per asset (USD at 1e18)
-    uint256 internal constant VAULT_CAP = 1_000_000e6; // 1M settlement units
     uint16 internal constant FEE_BPS = 1_000; // 10 % performance fee
     uint16 internal constant MAX_SLIPPAGE_BPS = 300; // 3 % max swap slippage
     uint256 internal constant NAV_TOLERANCE = 1e5; // rounding dust bound in settlement wei (0.1 unit)
@@ -137,9 +135,9 @@ abstract contract InvariantBase is Test {
         usdc.mint(address(routeC), ROUTE_FUNDS);
 
         vm.startPrank(admin);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenC), primaryC, fallbackC, address(routeC), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenC), primaryC, fallbackC, address(routeC), MAX_PRICE_AGE);
         vm.stopPrank();
     }
 
@@ -166,7 +164,6 @@ abstract contract InvariantBase is Test {
             MAX_SLIPPAGE_BPS,
             EquiVault.TimelockMode.Delayed,
             1 days,
-            VAULT_CAP,
             0,
             0
         );
@@ -226,13 +223,11 @@ contract EquiVaultHandler is Test {
     uint256 public ghostFees;
     uint256 public ghostTotalShares;
     bool public ghostActiveProposal;
-    bool public ghostCapViolation;
     mapping(address => uint256) public ghostShares;
     mapping(address => uint256) public ghostCost;
     mapping(address => uint256) public ghostDepositedBy;
 
     uint16 internal constant FEE_BPS = 1_000; // 10 %
-    uint256 internal constant VAULT_CAP = 1_000_000e6;
     uint256 internal constant PRICE_A = 100e18;
     uint256 internal constant PRICE_B = 50e18;
     uint256 internal constant PRICE_C = 200e18;
@@ -296,10 +291,6 @@ contract EquiVaultHandler is Test {
         if (vault.activeProposal().id != 0) return; // deposit then requires explicit consent
         if (vault.paused()) return;
 
-        uint256 navBefore = vault.totalAssets();
-        uint256 navAfter = navBefore + amount;
-        if (navAfter > vault.capAum() && seed % 4 != 0) return; // 1/4 still attempt to probe the guard
-
         uint256 n = vault.basketAssets().length;
         uint256[] memory mins = withMins ? new uint256[](n) : new uint256[](0);
 
@@ -310,7 +301,6 @@ contract EquiVaultHandler is Test {
         try vault.enter(EquiVault.EnterParams({
             settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: mins, deadline: type(uint256).max, proposalId: 0
         })) returns (uint256 shares) {
-            if (navAfter > vault.capAum()) ghostCapViolation = true;
             ghostShares[u] += shares;
             ghostCost[u] += amount;
             ghostDepositedBy[u] += amount;
@@ -363,7 +353,7 @@ contract EquiVaultHandler is Test {
         if (vault.activeProposal().id != 0) return;
         (address[] memory target, uint16[] memory weights) = _target(seed);
         vm.prank(manager);
-        try vault.proposeReallocation(target, weights, VAULT_CAP) {
+        try vault.proposeReallocation(target, weights) {
             ghostActiveProposal = true;
         } catch {}
     }
@@ -408,7 +398,7 @@ contract EquiVaultHandler is Test {
 
 /// @dev Constant-price invariant suite (F003-S002). Prices never move, routes are zero-fee, so the
 /// ghost ledger must equal the live vault to the wei: any insolvency, cost-basis corruption, fee
-/// bypass, weight distortion or cap breach shows up immediately.
+/// bypass or weight distortion shows up immediately.
 contract EquiVaultInvariantTest is InvariantBase {
     EquiVault internal vault;
     EquiVaultHandler internal handler;
@@ -489,13 +479,6 @@ contract EquiVaultInvariantTest is InvariantBase {
         }
     }
 
-    /// @dev AUM cap: NAV never exceeds the cap (constant prices here) and no deposit ever slipped
-    /// past the cap check.
-    function invariant_aumCap() public {
-        assertLe(vault.totalAssets(), vault.capAum());
-        assertFalse(handler.ghostCapViolation());
-    }
-
     /// @dev B001 regression: migrations reinvest the freed settlement; no idle settlement outside
     /// `totalAssets()`.
     function invariant_noOrphanSettlement() public {
@@ -566,7 +549,6 @@ contract StressHandler is Test {
     mapping(address => uint256) public ghostDepositedBy;
 
     uint16 internal constant FEE_BPS = 1_000; // 10 %
-    uint256 internal constant VAULT_CAP = 1_000_000e6;
     uint256 internal constant PRICE_A = 100e18;
     uint256 internal constant PRICE_B = 50e18;
     uint256 internal constant PRICE_C = 200e18;
@@ -738,15 +720,11 @@ contract StressHandler is Test {
 
         bool paused = vault.paused();
         if (!paused) {
-            uint256 navBefore = vault.totalAssets();
-            uint256 navAfter = navBefore + amount;
-            if (navAfter > vault.capAum() && seed % 4 != 0) return; // 1/4 still attempt to probe the guard
             vm.prank(u);
             try vault.enter(EquiVault.EnterParams({
                 settlementIn: amount, receiver: u, minSharesOut: 0, minAmountsOut: new uint256[](0),
                 deadline: type(uint256).max, proposalId: 0
             })) returns (uint256 shares) {
-                if (navAfter > vault.capAum()) ghostCapViolation = true;
                 _recordDeposit(u, shares, amount);
             } catch {}
         } else {
@@ -857,7 +835,7 @@ contract StressHandler is Test {
         if (!ghostActiveProposal) {
             (address[] memory target, uint16[] memory weights) = _target(seed);
             vm.prank(manager);
-            try vault.proposeReallocation(target, weights, VAULT_CAP) {
+            try vault.proposeReallocation(target, weights) {
                 ghostActiveProposal = true;
             } catch {}
             return;
@@ -1041,11 +1019,6 @@ contract ProtocolStressInvariantTest is InvariantBase {
         assertFalse(handler.ghostPauseViolation());
     }
 
-    /// @dev AUM cap is enforced: no deposit ever slipped past the cap check.
-    function invariant_capEnforced() public {
-        assertFalse(handler.ghostCapViolation());
-    }
-
     /// @dev B001 regression: after any sequence (including reallocations to strictly smaller
     /// baskets), the vault holds no meaningful settlement outside `totalAssets()` — migrations
     /// reinvest the freed balance toward the new target weights.
@@ -1186,8 +1159,6 @@ contract ReentrancyInvariantTest is Test {
     using Math for uint256;
 
     uint48 internal constant MAX_PRICE_AGE = 3 days;
-    uint256 internal constant EXPOSURE_CAP = 1_000_000e18;
-    uint256 internal constant VAULT_CAP = 1_000_000e6;
     uint256 internal constant ROUTE_FUNDS = 1e33;
 
     address internal admin = makeAddr("admin");
@@ -1244,9 +1215,9 @@ contract ReentrancyInvariantTest is Test {
         usdc.mint(address(routeB), ROUTE_FUNDS);
 
         vm.startPrank(admin);
-        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(attackToken), primaryAtk, fallbackAtk, address(routeAtk), EXPOSURE_CAP, MAX_PRICE_AGE);
-        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), EXPOSURE_CAP, MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenA), primaryA, fallbackA, address(routeA), MAX_PRICE_AGE);
+        registry.registerAsset(address(attackToken), primaryAtk, fallbackAtk, address(routeAtk), MAX_PRICE_AGE);
+        registry.registerAsset(address(tokenB), primaryB, fallbackB, address(routeB), MAX_PRICE_AGE);
         vm.stopPrank();
 
         address[] memory assets = new address[](2);
@@ -1256,7 +1227,7 @@ contract ReentrancyInvariantTest is Test {
         weights[0] = 5_000;
         weights[1] = 5_000;
         vault = new EquiVault(
-            usdc, registry, manager, assets, weights, 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, VAULT_CAP, 0, 0
+            usdc, registry, manager, assets, weights, 1_000, 300, EquiVault.TimelockMode.Delayed, 1 days, 0, 0
         );
         engine = new RebalanceEngine();
     }
@@ -1363,7 +1334,7 @@ contract ReentrancyInvariantTest is Test {
         weights[0] = 5_000;
         weights[1] = 5_000;
         vm.prank(manager);
-        vault.proposeReallocation(target, weights, VAULT_CAP);
+        vault.proposeReallocation(target, weights);
         vm.warp(block.timestamp + 1 days + 1);
         // refresh tokenA/attackToken/tokenB prices after the warp (MAX_PRICE_AGE = 3 days: still fresh)
         uint256 proposalId = vault.activeProposal().id;
@@ -1410,7 +1381,7 @@ contract FactoryHandler is Test {
         uint16[] memory w = new uint16[](2);
         w[0] = 5_000;
         w[1] = 5_000;
-        try factory.createVault(manager, a, w, fee, maxSlip, mode, delay, 100_000e6, drift, rebalSlip)
+        try factory.createVault(manager, a, w, fee, maxSlip, mode, delay, drift, rebalSlip)
         returns (address) {
             ++ghostCreated;
         } catch {}
@@ -1454,8 +1425,5 @@ contract VaultFactoryInvariantTest is InvariantBase {
         assertGe(v.driftThresholdBps(), 100);
         assertLe(v.driftThresholdBps(), 1_000);
         assertLe(v.rebalanceSlippageBps(), 300);
-        assertGt(v.capAum(), 0);
     }
 }
-
-
