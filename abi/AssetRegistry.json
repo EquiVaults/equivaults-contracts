@@ -30,19 +30,6 @@
   },
   {
     "type": "function",
-    "name": "BPS_DENOMINATOR",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint16",
-        "internalType": "uint16"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "DEFAULT_ADMIN_ROLE",
     "inputs": [],
     "outputs": [
@@ -91,11 +78,6 @@
             "name": "liquidityRoute",
             "type": "address",
             "internalType": "address"
-          },
-          {
-            "name": "exposureCapE18",
-            "type": "uint256",
-            "internalType": "uint256"
           },
           {
             "name": "maxPriceAge",
@@ -346,30 +328,6 @@
   },
   {
     "type": "function",
-    "name": "maxVaultAum",
-    "inputs": [
-      {
-        "name": "asset",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "weightBps",
-        "type": "uint16",
-        "internalType": "uint16"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "owner",
     "inputs": [],
     "outputs": [
@@ -481,11 +439,6 @@
         "internalType": "address"
       },
       {
-        "name": "exposureCapE18",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
         "name": "maxPriceAge",
         "type": "uint48",
         "internalType": "uint48"
@@ -570,24 +523,6 @@
   },
   {
     "type": "function",
-    "name": "setExposureCap",
-    "inputs": [
-      {
-        "name": "asset",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "exposureCapE18",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "supportsInterface",
     "inputs": [
       {
@@ -645,12 +580,6 @@
         "type": "address",
         "indexed": false,
         "internalType": "address"
-      },
-      {
-        "name": "exposureCapE18",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
       },
       {
         "name": "maxPriceAge",
@@ -745,25 +674,6 @@
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "ExposureCapUpdated",
-    "inputs": [
-      {
-        "name": "asset",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "exposureCapE18",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -975,11 +885,6 @@
   },
   {
     "type": "error",
-    "name": "InvalidExposureCap",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "InvalidPriceAge",
     "inputs": []
   },
@@ -991,17 +896,6 @@
         "name": "asset",
         "type": "address",
         "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "InvalidWeight",
-    "inputs": [
-      {
-        "name": "weightBps",
-        "type": "uint16",
-        "internalType": "uint16"
       }
     ]
   },

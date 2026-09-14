@@ -68,11 +68,6 @@
         "internalType": "uint256"
       },
       {
-        "name": "capAum_",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
         "name": "driftThresholdBps_",
         "type": "uint16",
         "internalType": "uint16"
@@ -232,12 +227,6 @@
         "type": "uint16",
         "indexed": false,
         "internalType": "uint16"
-      },
-      {
-        "name": "capAum",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
       }
     ],
     "anonymous": false
