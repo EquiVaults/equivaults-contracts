@@ -1,7 +1,14 @@
 {
   "schema": "equivaults-integration-artifacts/v1",
-  "contractsCommit": "8b6f83a7eac1dcb48a7b97cd752e2aa90f9cbac1",
-  "generatedAt": "2026-09-14",
+  "protocolVersion": 1,
+  "capabilities": {
+    "progressiveInvestment": {
+      "enabled": false,
+      "status": "development"
+    }
+  },
+  "contractsCommit": "2bc1fd3e15650edd29896d3871656f8ba2e1c8a3",
+  "generatedAt": "2026-09-17",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",
@@ -9,6 +16,7 @@
     "IERC20.json",
     "IPriceOracle.json",
     "ISwapRouter.json",
+    "InvestmentEscrow.json",
     "RebalanceEngine.json",
     "VaultFactory.json"
   ],
