@@ -15,6 +15,7 @@ EXPECTED_ABIS = (
     "IERC20.json",
     "IPriceOracle.json",
     "ISwapRouter.json",
+    "InvestmentEscrow.json",
     "RebalanceEngine.json",
     "VaultFactory.json",
 )

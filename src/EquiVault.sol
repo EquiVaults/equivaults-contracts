@@ -13,6 +13,9 @@ import {InitLib} from "./InitLib.sol";
 import {MigrationLib} from "./MigrationLib.sol";
 import {RebalanceLib} from "./RebalanceLib.sol";
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
+import {IAsyncVault} from "./interfaces/IAsyncVault.sol";
+import {AsyncEntryLib} from "./AsyncEntryLib.sol";
+import {InvestmentEscrowDeployLib} from "./InvestmentEscrowDeployLib.sol";
 
 /// @notice Stablecoin-settled basket vault holding registered assets, with a configurable trust
 /// mode and a reallocation proposal mechanism.
@@ -110,6 +113,8 @@ contract EquiVault is ERC20, ReentrancyGuard {
     uint256 public immutable timelockDelay;
     AssetRegistry public immutable registry;
     IERC20 public immutable settlementAsset;
+    /// @notice Personal request custody, separate from the shared vault balances and NAV.
+    address public immutable investmentEscrow;
     uint8 private immutable _settlementDecimals;
 
     address[] private _basketAssets;
@@ -163,6 +168,17 @@ contract EquiVault is ERC20, ReentrancyGuard {
     error InsufficientShares(address owner, uint256 available, uint256 required);
     error ExitMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
     error MigrationMinTooPermissive(uint256 index, uint256 minOut, uint256 defaultMinOut);
+    error NotInvestmentEscrow();
+
+    event InvestmentIntegrated(
+        address indexed owner,
+        address indexed escrow,
+        uint256 acquisitionCost,
+        uint256 valueReceived,
+        uint256 shares,
+        uint256 navBefore,
+        uint256 supplyBefore
+    );
 
     /// @notice Emitted after settlement is swapped into the basket and shares are minted from the
     /// basket value actually received, never from a pre-swap estimate.
@@ -172,22 +188,16 @@ contract EquiVault is ERC20, ReentrancyGuard {
 
     /// @notice Emitted after a holder exits. `settlementOut` is the actual settlement transferred
     /// to the receiver; token transfers are emitted by their ERC-20 contracts.
-    event Exited(address indexed owner, address indexed receiver, uint256 shares, uint256 settlementOut, uint256 feePot);
+    event Exited(
+        address indexed owner, address indexed receiver, uint256 shares, uint256 settlementOut, uint256 feePot
+    );
 
     event PerformanceFeeCollected(
-        address indexed manager,
-        address indexed treasury,
-        uint256 amount,
-        uint256 managerShare,
-        uint256 treasuryShare
+        address indexed manager, address indexed treasury, uint256 amount, uint256 managerShare, uint256 treasuryShare
     );
 
     event ReallocationProposed(
-        uint256 indexed id,
-        address indexed proposer,
-        uint256 executableAt,
-        address[] assets,
-        uint16[] weightsBps
+        uint256 indexed id, address indexed proposer, uint256 executableAt, address[] assets, uint16[] weightsBps
     );
 
     event ReallocationCancelled(uint256 indexed id);
@@ -246,11 +256,18 @@ contract EquiVault is ERC20, ReentrancyGuard {
         // VaultFactory embeds, so the factory stays under the EIP-170 code-size limit). 0 means
         // protocol defaults for drift and rebalance slippage.
         (uint16 drift, uint16 rebalanceSlip) = InitLib.validate(
-            manager_, registry_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_,
-            driftThresholdBps_, rebalanceSlippageBps_
+            manager_,
+            registry_,
+            feeBps_,
+            maxSlippageBps_,
+            timelockMode_,
+            timelockDelay_,
+            driftThresholdBps_,
+            rebalanceSlippageBps_
         );
         driftThresholdBps = drift;
         rebalanceSlippageBps = rebalanceSlip;
+        investmentEscrow = InvestmentEscrowDeployLib.deploy(settlementAsset_, registry_);
     }
 
     // ---------------------------------------------------------------------
@@ -275,6 +292,47 @@ contract EquiVault is ERC20, ReentrancyGuard {
         uint256 supply = totalSupply();
         if (shares == 0 || shares > supply) return 0;
         (, value) = ExitLib.computeExitAmounts(this, shares, supply);
+    }
+
+    /// @notice Binds outstanding requests to the accepted collective configuration.
+    /// @dev New proposals conservatively invalidate pending work even if subsequently cancelled.
+    function investmentVersion() external view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                block.chainid,
+                address(this),
+                proposalCounter,
+                _basketAssets,
+                _basketWeightsBps,
+                driftThresholdBps,
+                rebalanceSlippageBps
+            )
+        );
+    }
+
+    function previewInvestment(uint256[] calldata available)
+        external
+        view
+        returns (uint256 shares, uint256[] memory amounts, uint256 valueReceived)
+    {
+        return AsyncEntryLib.preview(IAsyncVault(address(this)), available);
+    }
+
+    /// @notice Admits a complete personal tranche; never performs a swap.
+    function integrateInvestment(address owner, uint256[] calldata amounts, uint256 acquisitionCost)
+        external
+        nonReentrant
+        returns (uint256 shares)
+    {
+        if (msg.sender != investmentEscrow) revert NotInvestmentEscrow();
+        uint256 valueReceived;
+        uint256 navBefore;
+        uint256 supplyBefore;
+        (shares, valueReceived, navBefore, supplyBefore) =
+            AsyncEntryLib.receiveTranche(IAsyncVault(address(this)), msg.sender, amounts);
+        costBasis[owner] += acquisitionCost;
+        _mint(owner, shares);
+        emit InvestmentIntegrated(owner, msg.sender, acquisitionCost, valueReceived, shares, navBefore, supplyBefore);
     }
 
     /// @notice Swaps settlement into the basket and mints shares from the value actually received.
@@ -397,10 +455,7 @@ contract EquiVault is ERC20, ReentrancyGuard {
     /// A vault in `Immutable` mode refuses proposals forever. Only one proposal can be active; replacing requires
     /// cancelling first and
     /// restarts the full delay.
-    function proposeReallocation(address[] calldata assets_, uint16[] calldata weightsBps_)
-        external
-        onlyManager
-    {
+    function proposeReallocation(address[] calldata assets_, uint16[] calldata weightsBps_) external onlyManager {
         if (timelockMode == TimelockMode.Immutable) revert TimelockImmutable();
         if (_activeProposal.id != 0) revert ProposalAlreadyActive(_activeProposal.id);
         if (_activeParameterProposal.id != 0) revert ProposalAlreadyActive(_activeParameterProposal.id);
@@ -408,14 +463,9 @@ contract EquiVault is ERC20, ReentrancyGuard {
         _validateReallocationTarget(assets_, weightsBps_);
 
         uint256 id = ++proposalCounter;
-        uint256 executableAt =
-            timelockMode == TimelockMode.Instant ? block.timestamp : block.timestamp + timelockDelay;
-        _activeProposal = ReallocationProposal({
-            id: id,
-            executableAt: executableAt,
-            assets: assets_,
-            weightsBps: weightsBps_
-        });
+        uint256 executableAt = timelockMode == TimelockMode.Instant ? block.timestamp : block.timestamp + timelockDelay;
+        _activeProposal =
+            ReallocationProposal({id: id, executableAt: executableAt, assets: assets_, weightsBps: weightsBps_});
         emit ReallocationProposed(id, manager, executableAt, assets_, weightsBps_);
     }
 
@@ -470,8 +520,7 @@ contract EquiVault is ERC20, ReentrancyGuard {
         _validateRebalanceParams(driftThresholdBps_, rebalanceSlippageBps_);
 
         uint256 id = ++proposalCounter;
-        uint256 executableAt =
-            timelockMode == TimelockMode.Instant ? block.timestamp : block.timestamp + timelockDelay;
+        uint256 executableAt = timelockMode == TimelockMode.Instant ? block.timestamp : block.timestamp + timelockDelay;
         _activeParameterProposal = ParameterProposal({
             id: id,
             executableAt: executableAt,
@@ -549,8 +598,7 @@ contract EquiVault is ERC20, ReentrancyGuard {
         // can neither inflate it nor receive anything without a valid rebalance. The rebate is
         // additionally bounded by the collective tolerance applied to this rebalance's proceeds,
         // preserving the buy leg even when the vault is smaller than the absolute rebate cap.
-        uint256 gasRebate =
-            RebalanceLib.computeRebate(startGas - gasleft(), soldValueSettlement, rebalanceSlippageBps);
+        uint256 gasRebate = RebalanceLib.computeRebate(startGas - gasleft(), soldValueSettlement, rebalanceSlippageBps);
         IERC20 settlement = settlementAsset;
         uint256 pool = settlement.balanceOf(address(this));
         if (gasRebate > pool) gasRebate = pool;
@@ -559,7 +607,9 @@ contract EquiVault is ERC20, ReentrancyGuard {
         uint256 boughtValueSettlement = RebalanceLib.buyUnderweight(this, nav, params.minAmountsOut);
         uint256[] memory weightsAfter = RebalanceLib.weightsBpsOf(this, totalAssets());
 
-        emit Rebalanced(_msgSender(), gasRebate, soldValueSettlement, boughtValueSettlement, weightsBefore, weightsAfter);
+        emit Rebalanced(
+            _msgSender(), gasRebate, soldValueSettlement, boughtValueSettlement, weightsBefore, weightsAfter
+        );
         return gasRebate;
     }
 
@@ -704,10 +754,7 @@ contract EquiVault is ERC20, ReentrancyGuard {
     /// @dev Rejects a reallocation target whose basket violates the vault rules. Asset
     /// statuses are checked with `canOpenExposure` so a proposal can only target assets the vault
     /// may still open exposure to.
-    function _validateReallocationTarget(
-        address[] memory assets_,
-        uint16[] memory weightsBps_
-    ) internal view {
+    function _validateReallocationTarget(address[] memory assets_, uint16[] memory weightsBps_) internal view {
         uint256 n = assets_.length;
         if (n == 0 || n > MAX_BASKET_SIZE) revert InvalidBasketSize(n);
         if (n != weightsBps_.length) revert BasketLengthMismatch(n, weightsBps_.length);

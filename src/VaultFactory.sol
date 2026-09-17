@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {AssetRegistry} from "./AssetRegistry.sol";
 import {EquiVault} from "./EquiVault.sol";
+import {VaultDeployLib} from "./VaultDeployLib.sol";
 
 /// @notice Permissionless factory deploying non-upgradeable EquiVaults for one deployment chain.
 /// @dev One factory per chain, bound at construction to that deployment's settlement asset (USDG
@@ -83,8 +84,17 @@ contract VaultFactory {
             if (!registry.canOpenExposure(assets_[i])) revert AssetNotAdmissible(assets_[i]);
         }
 
-        vault = _deploy(manager_, assets_, weightsBps_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_,
-            driftThresholdBps_, rebalanceSlippageBps_);
+        vault = _deploy(
+            manager_,
+            assets_,
+            weightsBps_,
+            feeBps_,
+            maxSlippageBps_,
+            timelockMode_,
+            timelockDelay_,
+            driftThresholdBps_,
+            rebalanceSlippageBps_
+        );
         _vaults.push(vault);
         _created[vault] = true;
 
@@ -92,8 +102,16 @@ contract VaultFactory {
         // drift/slippage when 0 was passed), so indexers never have to second-guess a field.
         EquiVault v = EquiVault(vault);
         emit VaultCreated(
-            vault, manager_, address(settlementAsset), block.chainid, v.timelockMode(), v.timelockDelay(), v.feeBps(),
-            v.maxSlippageBps(), v.driftThresholdBps(), v.rebalanceSlippageBps()
+            vault,
+            manager_,
+            address(settlementAsset),
+            block.chainid,
+            v.timelockMode(),
+            v.timelockDelay(),
+            v.feeBps(),
+            v.maxSlippageBps(),
+            v.driftThresholdBps(),
+            v.rebalanceSlippageBps()
         );
     }
 
@@ -109,20 +127,18 @@ contract VaultFactory {
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) private returns (address vault) {
-        vault = address(
-            new EquiVault(
-                settlementAsset,
-                registry,
-                manager_,
-                assets_,
-                weightsBps_,
-                feeBps_,
-                maxSlippageBps_,
-                timelockMode_,
-                timelockDelay_,
-                driftThresholdBps_,
-                rebalanceSlippageBps_
-            )
+        vault = VaultDeployLib.deploy(
+            settlementAsset,
+            registry,
+            manager_,
+            assets_,
+            weightsBps_,
+            feeBps_,
+            maxSlippageBps_,
+            timelockMode_,
+            timelockDelay_,
+            driftThresholdBps_,
+            rebalanceSlippageBps_
         );
     }
 

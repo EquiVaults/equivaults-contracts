@@ -5,6 +5,10 @@ Non-custodial, non-upgradeable basket vaults with non-transferable shares, expli
 This is a development protocol, not an audited production deployment. Yield strategies are
 not implemented in V1.
 
+New source also contains a development-only [progressive investment protocol](docs/progressive-investment.md):
+personal escrow requests, bounded purchases, complete proportional integration and independent
+stop/claims. Its client capability is disabled by default; it does not upgrade existing vaults.
+
 ## Verification
 
 Foundry 1.7.1, Solidity 0.8.30, pinned Git submodules, optimizer and via-IR:

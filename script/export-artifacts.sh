@@ -14,7 +14,7 @@ elif [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-CONTRACTS=(AssetRegistry EquiVault IERC20 IPriceOracle ISwapRouter RebalanceEngine VaultFactory)
+CONTRACTS=(AssetRegistry EquiVault IERC20 IPriceOracle ISwapRouter InvestmentEscrow RebalanceEngine VaultFactory)
 STAGE_DIR="$(mktemp -d .artifact-stage.XXXXXX)"
 STAGED_ABI="$STAGE_DIR/abi"
 STAGED_MANIFEST="$STAGE_DIR/manifest.json"
@@ -92,6 +92,8 @@ commit, date, abi_dir, manifest_path, mode, fingerprint = sys.argv[1:]
 abi_files = sorted(f for f in os.listdir(abi_dir) if f.endswith(".json"))
 manifest = {
     "schema": "equivaults-integration-artifacts/v1",
+    "protocolVersion": 1,
+    "capabilities": {"progressiveInvestment": {"enabled": False, "status": "development"}},
     "contractsCommit": commit,
     "generatedAt": date,
     "abiDir": "abi",
