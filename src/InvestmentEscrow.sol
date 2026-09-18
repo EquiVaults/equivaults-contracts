@@ -17,6 +17,11 @@ contract InvestmentEscrow is ReentrancyGuard {
     using Math for uint256;
     using SafeERC20 for IERC20;
 
+    /// @notice Protocol release implemented by escrow instances deployed from this source.
+    function protocolVersion() public pure returns (uint256) {
+        return 2;
+    }
+
     uint16 internal constant BPS_DENOMINATOR = 10_000;
 
     enum RequestStatus {

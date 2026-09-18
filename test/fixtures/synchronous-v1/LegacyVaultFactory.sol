@@ -3,9 +3,8 @@ pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {AssetRegistry} from "./AssetRegistry.sol";
-import {EquiVault} from "./EquiVault.sol";
-import {VaultDeployLib} from "./VaultDeployLib.sol";
+import {AssetRegistry} from "../../../src/AssetRegistry.sol";
+import {LegacyEquiVault} from "./LegacyEquiVault.sol";
 
 /// @notice Permissionless factory deploying non-upgradeable EquiVaults for one deployment chain.
 /// @dev One factory per chain, bound at construction to that deployment's settlement asset (USDG
@@ -17,7 +16,7 @@ import {VaultDeployLib} from "./VaultDeployLib.sol";
 /// without a backend. The chain id is exposed for indexers; no signature scheme is used yet, so no
 /// EIP-712 domain is needed — any future signature scheme MUST include the chain id in its domain
 /// so a vault created on Robinhood Chain is never replayable on another EVM chain.
-contract VaultFactory {
+contract LegacyVaultFactory {
     /// @notice Deployment settlement asset; every vault created here settles in it.
     IERC20 public immutable settlementAsset;
 
@@ -39,18 +38,13 @@ contract VaultFactory {
         address indexed manager,
         address indexed settlementAsset,
         uint256 chainId,
-        EquiVault.TimelockMode timelockMode,
+        LegacyEquiVault.TimelockMode timelockMode,
         uint256 timelockDelay,
         uint16 feeBps,
         uint16 maxSlippageBps,
         uint16 driftThresholdBps,
         uint16 rebalanceSlippageBps
     );
-
-    /// @notice Protocol release implemented by factories deployed from this source.
-    function protocolVersion() public pure returns (uint256) {
-        return 2;
-    }
 
     constructor(IERC20 settlementAsset_, AssetRegistry registry_) {
         if (address(settlementAsset_) == address(0)) revert InvalidAddress();
@@ -69,19 +63,19 @@ contract VaultFactory {
     /// @param timelockDelay_ Delay used by Delayed mode, otherwise must be 0.
     /// @param driftThresholdBps_ Rebalance drift threshold (1-10 points; 0 = default 3).
     /// @param rebalanceSlippageBps_ Collective rebalance slippage (0.1-3 %; 0 = default 1 %).
-    /// @return vault Address of the deployed EquiVault.
+    /// @return vault Address of the deployed LegacyEquiVault.
     function createVault(
         address manager_,
         address[] calldata assets_,
         uint16[] calldata weightsBps_,
         uint16 feeBps_,
         uint16 maxSlippageBps_,
-        EquiVault.TimelockMode timelockMode_,
+        LegacyEquiVault.TimelockMode timelockMode_,
         uint256 timelockDelay_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) external returns (address vault) {
-        // Only assets the registry currently admits may enter a new basket; the EquiVault
+        // Only assets the registry currently admits may enter a new basket; the LegacyEquiVault
         // constructor then enforces the remaining bounds (basket size, weights, fee, slippage,
         // timelock, drift and rebalance slippage) with specific errors.
         uint256 n = assets_.length;
@@ -89,34 +83,17 @@ contract VaultFactory {
             if (!registry.canOpenExposure(assets_[i])) revert AssetNotAdmissible(assets_[i]);
         }
 
-        vault = _deploy(
-            manager_,
-            assets_,
-            weightsBps_,
-            feeBps_,
-            maxSlippageBps_,
-            timelockMode_,
-            timelockDelay_,
-            driftThresholdBps_,
-            rebalanceSlippageBps_
-        );
+        vault = _deploy(manager_, assets_, weightsBps_, feeBps_, maxSlippageBps_, timelockMode_, timelockDelay_,
+            driftThresholdBps_, rebalanceSlippageBps_);
         _vaults.push(vault);
         _created[vault] = true;
 
         // The event mirrors the vault's effective state (after applying the protocol defaults for
         // drift/slippage when 0 was passed), so indexers never have to second-guess a field.
-        EquiVault v = EquiVault(vault);
+        LegacyEquiVault v = LegacyEquiVault(vault);
         emit VaultCreated(
-            vault,
-            manager_,
-            address(settlementAsset),
-            block.chainid,
-            v.timelockMode(),
-            v.timelockDelay(),
-            v.feeBps(),
-            v.maxSlippageBps(),
-            v.driftThresholdBps(),
-            v.rebalanceSlippageBps()
+            vault, manager_, address(settlementAsset), block.chainid, v.timelockMode(), v.timelockDelay(), v.feeBps(),
+            v.maxSlippageBps(), v.driftThresholdBps(), v.rebalanceSlippageBps()
         );
     }
 
@@ -127,23 +104,25 @@ contract VaultFactory {
         uint16[] calldata weightsBps_,
         uint16 feeBps_,
         uint16 maxSlippageBps_,
-        EquiVault.TimelockMode timelockMode_,
+        LegacyEquiVault.TimelockMode timelockMode_,
         uint256 timelockDelay_,
         uint16 driftThresholdBps_,
         uint16 rebalanceSlippageBps_
     ) private returns (address vault) {
-        vault = VaultDeployLib.deploy(
-            settlementAsset,
-            registry,
-            manager_,
-            assets_,
-            weightsBps_,
-            feeBps_,
-            maxSlippageBps_,
-            timelockMode_,
-            timelockDelay_,
-            driftThresholdBps_,
-            rebalanceSlippageBps_
+        vault = address(
+            new LegacyEquiVault(
+                settlementAsset,
+                registry,
+                manager_,
+                assets_,
+                weightsBps_,
+                feeBps_,
+                maxSlippageBps_,
+                timelockMode_,
+                timelockDelay_,
+                driftThresholdBps_,
+                rebalanceSlippageBps_
+            )
         );
     }
 

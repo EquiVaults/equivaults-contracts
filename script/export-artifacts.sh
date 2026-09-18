@@ -92,8 +92,8 @@ commit, date, abi_dir, manifest_path, mode, fingerprint = sys.argv[1:]
 abi_files = sorted(f for f in os.listdir(abi_dir) if f.endswith(".json"))
 manifest = {
     "schema": "equivaults-integration-artifacts/v1",
-    "protocolVersion": 1,
-    "capabilities": {"progressiveInvestment": {"enabled": False, "status": "development"}},
+    "protocolVersion": 2,
+    "capabilities": {"progressiveInvestment": {"enabled": True, "status": "local"}},
     "contractsCommit": commit,
     "generatedAt": date,
     "abiDir": "abi",

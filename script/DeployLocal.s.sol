@@ -7,6 +7,8 @@ import {AssetRegistry} from "../src/AssetRegistry.sol";
 import {EquiVault} from "../src/EquiVault.sol";
 import {RebalanceEngine} from "../src/RebalanceEngine.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
+import {LegacyEquiVault} from "../test/fixtures/synchronous-v1/LegacyEquiVault.sol";
+import {LegacyVaultFactory} from "../test/fixtures/synchronous-v1/LegacyVaultFactory.sol";
 
 import {MockOracle, MockPool, MockToken} from "../test/mocks/Mocks.sol";
 import {NamedMockToken} from "./LocalDemoTokens.sol";
@@ -19,9 +21,10 @@ import {NamedMockToken} from "./LocalDemoTokens.sol";
 ///      anvil --chain-id 31337
 ///      forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 \
 ///        --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow
+///      python3 script/export-addresses.py --rpc-url http://127.0.0.1:8545
 ///      Every call is a broadcast tx signed by the sender, which is also the registry admin:
 ///      permissioned setup (registerAsset) and pool seeding work because msg.sender == ANVIL0.
-///      The script writes `deployments/31337/addresses.json` (committed for the frontend).
+///      The receipt exporter writes `deployments/31337/addresses.json` after validating the chain.
 contract DeployLocal is Script {
     uint48 internal constant MAX_PRICE_AGE = 1 hours;
     uint256 internal constant PRICE_A = 100e18; // $100 per whole token
@@ -50,8 +53,10 @@ contract DeployLocal is Script {
     MockPool internal poolB;
     AssetRegistry internal registry;
     VaultFactory internal factory;
+    LegacyVaultFactory internal legacyFactory;
     RebalanceEngine internal engine;
     address internal exampleVault;
+    address internal legacyExampleVault;
 
     function run() public {
         require(block.chainid == 31337, "DeployLocal: expected Anvil chainId 31337");
@@ -93,7 +98,7 @@ contract DeployLocal is Script {
         registry.registerAsset(address(tokenA), primaryA, fallbackA, address(poolA), MAX_PRICE_AGE);
         registry.registerAsset(address(tokenB), primaryB, fallbackB, address(poolB), MAX_PRICE_AGE);
 
-        // --- Factory + example vault + rebalance engine ---
+        // --- v2 factory + hybrid example vault, v1 synchronous compatibility vault, and engine ---
         factory = new VaultFactory(settlement, registry);
         exampleVault = factory.createVault(
             ANVIL1,
@@ -105,6 +110,18 @@ contract DeployLocal is Script {
             1 days,
             0, // driftThresholdBps -> protocol default (300)
             0 // rebalanceSlippageBps -> protocol default (100)
+        );
+        legacyFactory = new LegacyVaultFactory(settlement, registry);
+        legacyExampleVault = legacyFactory.createVault(
+            ANVIL1,
+            _assetsAB(),
+            _weightsAB(),
+            1_000,
+            300,
+            LegacyEquiVault.TimelockMode.Delayed,
+            1 days,
+            0,
+            0
         );
         engine = new RebalanceEngine();
 
@@ -143,6 +160,8 @@ contract DeployLocal is Script {
         console2.log("  registry   ", address(registry));
         console2.log("  factory    ", address(factory));
         console2.log("  vault      ", exampleVault);
+        console2.log("  legacyFactory", address(legacyFactory));
+        console2.log("  legacyVault  ", legacyExampleVault);
         console2.log("  engine     ", address(engine));
     }
 
