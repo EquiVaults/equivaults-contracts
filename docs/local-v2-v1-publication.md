@@ -73,13 +73,16 @@ Vault baskets remain limited to five assets. Measured runtime sizes for this fix
 
 | Contract | Runtime bytes |
 | --- | ---: |
+| VaultDeployLib v2 | 23,278 |
+| InvestmentEscrowDeployLib v2 | 12,837 |
 | VaultFactory v2 | 2,356 |
 | EquiVault v2 | 19,073 |
 | InvestmentEscrow v2 | 12,082 |
 | LegacyVaultFactory v1 | 22,629 |
 | LegacyEquiVault v1 | 17,288 |
 
-All are below the EIP-170 runtime limit of 24,576 bytes. Re-measure after any compiler, optimizer,
+All production contracts and libraries are below the EIP-170 runtime limit of 24,576 bytes.
+The largest is `VaultDeployLib`, leaving 1,298 bytes of margin. Re-measure after any compiler, optimizer,
 library or source change; prior sizes do not prove later deployability.
 
 The local five-leg integration scenario measured five fills at 929,420 gas total and integration
