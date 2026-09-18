@@ -1,14 +1,14 @@
 {
   "schema": "equivaults-integration-artifacts/v1",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "capabilities": {
     "progressiveInvestment": {
-      "enabled": false,
-      "status": "development"
+      "enabled": true,
+      "status": "local"
     }
   },
-  "contractsCommit": "2bc1fd3e15650edd29896d3871656f8ba2e1c8a3",
-  "generatedAt": "2026-09-17",
+  "contractsCommit": "e4892038b4744fbe1b5d3c834b81df54416a8a6d",
+  "generatedAt": "2026-09-18",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",
