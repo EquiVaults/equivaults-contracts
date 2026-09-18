@@ -5,9 +5,10 @@ Non-custodial, non-upgradeable basket vaults with non-transferable shares, expli
 This is a development protocol, not an audited production deployment. Yield strategies are
 not implemented in V1.
 
-New source also contains a development-only [progressive investment protocol](docs/progressive-investment.md):
+New source also contains a local-only [progressive investment protocol](docs/progressive-investment.md):
 personal escrow requests, bounded purchases, complete proportional integration and independent
-stop/claims. Its client capability is disabled by default; it does not upgrade existing vaults.
+stop/claims. It does not upgrade existing vaults. Follow the local publication runbook before
+enabling a client against a generated fixture.
 
 ## Verification
 
@@ -36,7 +37,8 @@ anvil --chain-id 31337
 # In another terminal:
 forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 \
   --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow
-python3 script/export-addresses.py
+python3 script/export-addresses.py --rpc-url http://127.0.0.1:8545
+bash script/check-artifacts.sh --rpc-url http://127.0.0.1:8545
 ```
 
 Only the documented Anvil accounts are used; no private key is required.
@@ -52,6 +54,7 @@ This is a breaking ABI change: old non-upgradeable vaults retain their previous 
 semantics and must not be treated as ID-guarded instances.
 `script/export-artifacts.sh` refuses uncommitted source so the manifest's commit cannot
 misrepresent the compiled contracts. Commit reviewed source before publishing a new manifest.
+The full v1/v2 local publication sequence is in [docs/local-v2-v1-publication.md](docs/local-v2-v1-publication.md).
 
 If local script execution stalls while resolving external Sourcify source labels, add
 `--offline` to `forge script` after the pinned compiler and dependencies are installed.

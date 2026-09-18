@@ -1,7 +1,7 @@
 # Progressive investment protocol (development)
 
-Newly deployed vaults own an immutable `InvestmentEscrow`. Existing deployments are not
-upgraded. The published client capability stays disabled pending recovery UI and deployment
+Newly deployed v2 vaults own an immutable `InvestmentEscrow`. Existing deployments are not
+upgraded. The published capability is limited to validated local fixtures; it is not production
 qualification. All examples below concern standard, non-taxed, non-rebasing ERC-20 tokens.
 Registry admission must attest those properties; balance checks cannot make arbitrary tokens safe.
 
