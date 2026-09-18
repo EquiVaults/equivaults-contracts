@@ -102,7 +102,7 @@ manifest = {
         "31337": {
             "addressesFile": "deployments/31337/addresses.json",
             "network": "anvil-local",
-            "note": "Regenerate with: anvil --chain-id 31337 && forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow && python3 script/export-addresses.py",
+            "note": "Regenerate with: anvil --chain-id 31337 && forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --slow && python3 script/export-addresses.py --rpc-url http://127.0.0.1:8545",
         }
     },
     "note": "Regenerate ABI and manifest after any contract change: ./script/export-artifacts.sh",
