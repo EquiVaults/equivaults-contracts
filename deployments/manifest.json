@@ -4,11 +4,15 @@
   "capabilities": {
     "progressiveInvestment": {
       "enabled": true,
-      "status": "local"
+      "status": "local",
+      "personalPriceLimits": {
+        "enabled": true,
+        "version": 1
+      }
     }
   },
-  "contractsCommit": "3e5a0e8d09367ef306bc2bb14faf3eae5f15ceb7",
-  "generatedAt": "2026-09-18",
+  "contractsCommit": "79148e699fb4d8ccecd9df1f17986d225c057dcc",
+  "generatedAt": "2026-09-19",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",

@@ -27,8 +27,8 @@
     {
       "address": "0x09635f643e140090a9a8dcd712ed6285858cebef",
       "protocolVersion": 2,
-      "codeHash": "0xaa8fdf1972b6c9f4c46282a367813f26e692644e0d2a81d189dcaf017900d292",
-      "contractsCommit": "3e5a0e8d09367ef306bc2bb14faf3eae5f15ceb7"
+      "codeHash": "0x68e01fb271a7f2f15813a6f4ec5826e1656fc4a6a72ce3cce91124a4ca0bed2c",
+      "contractsCommit": "79148e699fb4d8ccecd9df1f17986d225c057dcc"
     },
     {
       "address": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
