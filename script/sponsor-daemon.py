@@ -38,7 +38,7 @@ class Pause(RuntimeError):
     """A controlled public operator reason; never an arbitrary RPC error message."""
 
 class RpcTransportError(RuntimeError):
-    pass
+    """Transport or provider failure, without evidence of an EVM rejection."""
 
 class RpcExecutionError(RuntimeError):
     pass
@@ -62,8 +62,17 @@ class Rpc:
                 reply = json.load(response)
         except Exception as error:
             raise RpcTransportError('rpc_transport') from error
-        if reply.get('error'):
-            raise RpcExecutionError('rpc_execution_rejected')
+        error = reply.get('error')
+        if error:
+            # This local operator only accepts Anvil. Its explicit EVM revert response
+            # must not be confused with JSON-RPC internal/state/method errors.
+            if (method in ('eth_call', 'eth_estimateGas') and isinstance(error, dict)
+                    and error.get('code') == 3
+                    and str(error.get('message', '')).startswith('execution reverted')
+                    and isinstance(error.get('data'), str)
+                    and re.fullmatch(r'0x(?:[0-9a-fA-F]{2})*', error['data'])):
+                raise RpcExecutionError('rpc_execution_rejected')
+            raise RpcTransportError('rpc_unavailable')
         return reply['result']
 
     def read(self, target, data, block):
@@ -427,10 +436,13 @@ class Sponsor:
             if preview:
                 data = calldata('integrate(uint256,uint256)', rid, seq)
             else:
-                limits = [self.rpc.uint(escrow, 'maxFillAmount(uint256,uint256)', tag, rid, i) for i in range(n)]
-                amount = min(max(limits), available, self.a.max_fill)
+                # No settlement means no purchase, independent of route health. The
+                # unsuccessful preview above only establishes no current integration;
+                # it does not establish a market cause or permanent impossibility.
+                limits = [self.rpc.uint(escrow, 'maxFillAmount(uint256,uint256)', tag, rid, i) for i in range(n)] if available else []
+                amount = min(max(limits, default=0), available, self.a.max_fill)
                 if not amount:
-                    item.update(state='waiting_market', reason='no_admissible_fill')
+                    item.update(state='no_admissible_action', reason='no_admissible_action')
                     self.status.request(item)
                     return False
                 data = calldata('fill(uint256,uint256,uint256,uint256,uint256)', rid, limits.index(max(limits)), amount, seq, integer(block['timestamp']) + 300)
@@ -447,7 +459,7 @@ class Sponsor:
             self.status.request(item)
             return False
         except RpcTransportError:
-            item.update(state='waiting_operator', reason='rpc_transport')
+            item.update(state='waiting_operator', reason='rpc_unavailable')
             self.status.request(item)
             raise
         except Pause as error:

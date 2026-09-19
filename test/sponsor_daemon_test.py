@@ -1,5 +1,6 @@
 import importlib.util, json, tempfile, unittest
 from pathlib import Path
+from io import BytesIO
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('sponsor', Path(__file__).parents[1] / 'script/sponsor-daemon.py')
 sponsor = importlib.util.module_from_spec(spec)
@@ -365,6 +366,119 @@ class CycleTests(unittest.TestCase):
                 self.assertEqual(len(fake.sent), 1)
             finally:
                 daemon.db.close()
+
+    def test_residual_assets_are_not_diagnosed_as_market_wait_and_can_resume(self):
+        for preview_reverts in (False, True):
+            with self.subTest(preview_reverts=preview_reverts), tempfile.TemporaryDirectory() as directory:
+                daemon = sponsor.Sponsor(self.args(directory))
+                fake = FakeRpc()
+                daemon.rpc = fake
+                original_read, original_uint = fake.read, fake.uint
+                integrable = False
+
+                def residual_read(target, data, block):
+                    if target == fake.escrow and data.startswith('0xc58343ef'):
+                        words = [original_read(target, data, block)[2:][i:i+64] for i in range(0, 640, 64)]
+                        words[5] = '0' * 64  # No unspent settlement.
+                        return '0x' + ''.join(words)
+                    if target == fake.escrow and len(data) > 74:
+                        return '0x' + f'{5:064x}{2:064x}'  # Personal token residue.
+                    if target == fake.vault and len(data) != 10:
+                        if integrable:
+                            return '0x' + f'{1:064x}'
+                        if preview_reverts:
+                            raise sponsor.RpcExecutionError('tranche_rejected')
+                    return original_read(target, data, block)
+
+                def no_pointless_fill_read(target, signature, block, *args):
+                    if signature == 'maxFillAmount(uint256,uint256)':
+                        self.fail('No settlement: route health cannot enable a purchase')
+                    return original_uint(target, signature, block, *args)
+
+                fake.read, fake.uint = residual_read, no_pointless_fill_read
+                try:
+                    self.assertFalse(daemon.try_request(fake.vault, fake.escrow, 1, '0x10', {'timestamp': '0x20', 'hash': '0xblock'}))
+                    item = daemon.status.requests[fake.escrow, '1']
+                    self.assertEqual((item['state'], item['reason']), ('no_admissible_action', 'no_admissible_action'))
+                    self.assertEqual(fake.sent, [])
+                    self.assertEqual((daemon.db.spent(), daemon.db.reserved()), (0, 0))
+                    # The diagnosis is temporary, not a terminal state or automatic recovery.
+                    integrable = True
+                    self.assertTrue(daemon.try_request(fake.vault, fake.escrow, 1, '0x10', {'timestamp': '0x20', 'hash': '0xblock'}))
+                    self.assertEqual(fake.sent[0]['data'], sponsor.calldata('integrate(uint256,uint256)', 1, 0))
+                finally:
+                    daemon.db.close()
+
+    def test_zero_fill_bounds_do_not_imply_a_market_cause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            daemon = sponsor.Sponsor(self.args(directory))
+            fake = FakeRpc()
+            daemon.rpc = fake
+            original = fake.uint
+            fake.uint = lambda target, signature, block, *args: 0 if signature == 'maxFillAmount(uint256,uint256)' else original(target, signature, block, *args)
+            try:
+                self.assertFalse(daemon.try_request(fake.vault, fake.escrow, 1, '0x10', {'timestamp': '0x20', 'hash': '0xblock'}))
+                self.assertEqual(daemon.status.requests[fake.escrow, '1']['state'], 'no_admissible_action')
+                self.assertEqual(fake.sent, [])
+            finally:
+                daemon.db.close()
+
+    def test_unreadable_preview_is_operator_uncertainty_not_a_residual_diagnosis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            daemon = sponsor.Sponsor(self.args(directory))
+            fake = FakeRpc()
+            daemon.rpc = fake
+            original = fake.read
+            def unreadable(target, data, block):
+                if target == fake.vault and len(data) != 10:
+                    raise sponsor.RpcTransportError('rpc_transport')
+                return original(target, data, block)
+            fake.read = unreadable
+            try:
+                with self.assertRaises(sponsor.RpcTransportError):
+                    daemon.try_request(fake.vault, fake.escrow, 1, '0x10', {'timestamp': '0x20', 'hash': '0xblock'})
+                self.assertEqual(daemon.status.requests[fake.escrow, '1']['state'], 'waiting_operator')
+                self.assertEqual(fake.sent, [])
+            finally:
+                daemon.db.close()
+
+    def test_json_rpc_provider_errors_are_not_evm_rejections_or_residual_evidence(self):
+        errors = [
+            {'code': -32603, 'message': 'internal error'},
+            {'code': -32000, 'message': 'historical state unavailable'},
+            {'code': 3, 'message': 'execution reverted', 'data': 'malformed'},
+            {'code': 3, 'message': 'execution reverted', 'data': '0x'},
+        ]
+        for error in errors:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                daemon = sponsor.Sponsor(self.args(directory))
+                fake = FakeRpc()
+                daemon.rpc = fake
+                original = fake.read
+                transport = sponsor.Rpc(daemon.a.rpc_url)
+                def read(target, data, block):
+                    if target == fake.escrow and data.startswith('0xc58343ef'):
+                        raw = original(target, data, block)[2:]
+                        return '0x' + raw[:5*64] + '0'*64 + raw[6*64:]
+                    if target == fake.vault and len(data) != 10:
+                        # Exercise actual JSON-RPC decoding, not a preclassified exception.
+                        return transport.read(target, data, block)
+                    return original(target, data, block)
+                fake.read = read
+                try:
+                    with patch.object(transport.http, 'open', return_value=BytesIO(json.dumps({'jsonrpc': '2.0', 'id': 1, 'error': error}).encode())):
+                        if error.get('data') == '0x':
+                            self.assertFalse(daemon.try_request(fake.vault, fake.escrow, 1, '0x10', {'timestamp': '0x20', 'hash': '0xblock'}))
+                            expected = 'no_admissible_action'
+                        else:
+                            with self.assertRaises(sponsor.RpcTransportError):
+                                daemon.try_request(fake.vault, fake.escrow, 1, '0x10', {'timestamp': '0x20', 'hash': '0xblock'})
+                            expected = 'waiting_operator'
+                        self.assertEqual(daemon.status.requests[fake.escrow, '1']['state'], expected)
+                        self.assertEqual(fake.sent, [])
+                        self.assertEqual(daemon.db.reserved(), 0)
+                finally:
+                    daemon.db.close()
 
     def test_snapshot_reorg_before_send_prevents_write(self):
         with tempfile.TemporaryDirectory() as directory:

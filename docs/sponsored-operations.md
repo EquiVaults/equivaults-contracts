@@ -23,7 +23,8 @@ fees, including reverted transactions, are charged only to the sponsor ledger.
 snapshot under `equivaults-sponsor-status/v1`. It is read-only, under 64 KB, and remains available
 with a stale heartbeat if RPC later fails. `waiting_market` means a verified on-chain simulation or
 admission condition prevented work; `waiting_operator` means RPC or local operator state needs
-attention. Recovery remains available to the request owner.
+attention. `no_admissible_action` means neither a tranche nor a purchase is currently available,
+without attributing a market cause. Recovery remains available to the request owner.
 
 ## Operation and recovery
 
@@ -55,8 +56,12 @@ and database; changing the budget, account or deployment does not silently reset
   Requests outside the fresh cache have unknown status rather than a false healthy indication.
 
 An integration may leave indivisible personal token residue. The daemon does not close or claim
-it for the owner: no admissible tranche means waiting, with stop/claim still available. Already
-issued shares remain owned by the investor. The newest confirmed receipt's canonical block hash
+it for the owner. An unsuccessful tranche preview together with zero settlement, or zero fill
+bounds, produces `no_admissible_action`, not a market-wait diagnosis. The loop keeps checking;
+this is not a claim of permanent non-integrability. RPC uncertainty cannot produce this diagnosis.
+Stop/claim remain available, and already issued shares stay invested. Update the daemon and app
+together; older clients reject the additive status as unknown rather than showing a market cause.
+The newest confirmed receipt's canonical block hash
 also commits to its ancestors, so one cumulative anchor covers previously charged receipts.
 This intentionally favors safe pauses over automatic reorg recovery.
 
