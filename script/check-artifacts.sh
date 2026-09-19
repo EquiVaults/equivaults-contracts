@@ -64,7 +64,7 @@ require(isinstance(manifest.get("contractsCommit"), str) and COMMIT_RE.fullmatch
 require(isinstance(manifest.get("generatedAt"), str), "generatedAt must be an ISO date")
 datetime.date.fromisoformat(manifest["generatedAt"])
 require(manifest.get("protocolVersion") == 2, "manifest protocolVersion must be 2")
-require(manifest.get("capabilities", {}).get("progressiveInvestment") == {"enabled": True, "status": "local"}, "progressive investment local capability")
+require(manifest.get("capabilities", {}).get("progressiveInvestment") == {"enabled": True, "status": "local", "personalPriceLimits": {"enabled": True, "version": 1}}, "progressive investment and price-limit local capabilities")
 require(manifest.get("abiDir") == "abi", "ABI directory must be the published abi/ directory")
 require(manifest.get("abiFiles") == list(EXPECTED_ABIS), "manifest ABI list is incomplete or unexpected")
 
@@ -74,6 +74,9 @@ for filename in EXPECTED_ABIS:
     abi = load_json(artifact_path)
     require(isinstance(abi, list) and abi, f"empty or invalid ABI: {artifact_path}")
     require(any(isinstance(entry, dict) and entry.get("type") in {"function", "event", "error"} for entry in abi), f"no consumer-callable entries in ABI: {artifact_path}")
+    if filename == "InvestmentEscrow.json":
+        functions = {entry.get("name") for entry in abi if entry.get("type") == "function"}
+        require({"priceLimitsVersion", "createRequestWithLimits", "getRequestPriceLimits"} <= functions, "missing advertised price-limit interface")
 
 chains = manifest.get("chains")
 require(isinstance(chains, dict) and chains, "manifest lists no chains")
@@ -123,6 +126,9 @@ for chain_id, chain in chains.items():
             code = subprocess.check_output(["cast", "code", "--rpc-url", rpc_url, entry["address"]], text=True).strip()
             actual_hash = subprocess.check_output(["cast", "keccak", code], text=True).strip().lower()
             require(actual_hash == entry["codeHash"].lower(), f"on-chain code hash mismatch for v{entry['protocolVersion']} factory")
+        escrow = subprocess.check_output(["cast", "call", addresses["exampleVault"], "investmentEscrow()(address)", "--rpc-url", rpc_url], text=True).strip()
+        price_limits_version = subprocess.check_output(["cast", "call", escrow, "priceLimitsVersion()(uint256)", "--rpc-url", rpc_url], text=True).strip()
+        require(price_limits_version == "1", "deployed escrow does not advertise price-limit version 1")
     print(f"  chain {chain_id}: {address_file} ok")
 
 print(f"artifacts OK: {len(EXPECTED_ABIS)} ABI files, {len(chains)} chain(s), manifest at {manifest['contractsCommit'][:8]}")

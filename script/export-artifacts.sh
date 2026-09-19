@@ -93,7 +93,7 @@ abi_files = sorted(f for f in os.listdir(abi_dir) if f.endswith(".json"))
 manifest = {
     "schema": "equivaults-integration-artifacts/v1",
     "protocolVersion": 2,
-    "capabilities": {"progressiveInvestment": {"enabled": True, "status": "local"}},
+    "capabilities": {"progressiveInvestment": {"enabled": True, "status": "local", "personalPriceLimits": {"enabled": True, "version": 1}}},
     "contractsCommit": commit,
     "generatedAt": date,
     "abiDir": "abi",

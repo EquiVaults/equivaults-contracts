@@ -22,6 +22,12 @@ contract InvestmentEscrow is ReentrancyGuard {
         return 2;
     }
 
+    /// @notice Revision of the optional per-request price-limit interface.
+    /// @dev This is deliberately separate from protocolVersion: existing V2 requests and their ABI stay unchanged.
+    function priceLimitsVersion() external pure returns (uint256) {
+        return 1;
+    }
+
     uint16 internal constant BPS_DENOMINATOR = 10_000;
 
     enum RequestStatus {
@@ -56,6 +62,8 @@ contract InvestmentEscrow is ReentrancyGuard {
     uint256 public nextRequestId = 1;
     mapping(uint256 requestId => Request request) private _requests;
     mapping(uint256 requestId => address[] assets) private _requestAssets;
+    /// @dev Whole settlement units per whole asset, scaled to 1e18. A zero entry disables the personal ceiling.
+    mapping(uint256 requestId => uint256[] maxPricesE18) private _requestPriceLimits;
     mapping(uint256 requestId => mapping(address token => Position position)) private _positions;
 
     error UnknownRequest(uint256 requestId);
@@ -81,10 +89,15 @@ contract InvestmentEscrow is ReentrancyGuard {
     error NoIntegrableTranche(uint256 requestId);
     error VaultPullMismatch(address asset, uint256 expected, uint256 actual);
     error IntegrationSharesMismatch(uint256 previewed, uint256 actual);
+    error PriceLimitsLengthMismatch(uint256 expected, uint256 actual);
+    error UnsafePriceLimit(
+        uint256 index, uint256 maxPriceE18, uint256 minimumPriceE18, uint256 maximumPriceE18
+    );
 
     event RequestCreated(
         uint256 indexed requestId, address indexed owner, bytes32 indexed version, uint256 deposited, address[] assets
     );
+    event RequestPriceLimitsSet(uint256 indexed requestId, uint256[] maxPricesE18);
     event RequestFilled(
         uint256 indexed requestId,
         uint256 indexed index,
@@ -129,6 +142,13 @@ contract InvestmentEscrow is ReentrancyGuard {
         return _requestAssets[requestId];
     }
 
+    /// @notice Immutable personal purchase-price ceilings aligned with requestAssets.
+    /// @dev A zero entry means the corresponding asset uses only the vault's live oracle slippage protection.
+    function getRequestPriceLimits(uint256 requestId) external view returns (uint256[] memory) {
+        _request(requestId);
+        return _requestPriceLimits[requestId];
+    }
+
     function positions(uint256 requestId, address token) external view returns (uint256 quantity, uint256 cost) {
         _request(requestId);
         Position storage position = _positions[requestId][token];
@@ -157,6 +177,29 @@ contract InvestmentEscrow is ReentrancyGuard {
         nonReentrant
         returns (uint256 requestId)
     {
+        uint256[] memory noPriceLimits;
+        return _createRequest(amount, expectedVersion, deadline, noPriceLimits, false);
+    }
+
+    /// @notice Deposits exact settlement units and freezes a personal maximum all-in purchase price per basket asset.
+    /// @dev A zero ceiling disables the personal limit for that asset. Limits are immutable: stop and create a new
+    /// request to use a refreshed consented reference.
+    function createRequestWithLimits(
+        uint256 amount,
+        bytes32 expectedVersion,
+        uint256 deadline,
+        uint256[] calldata maxPricesE18
+    ) external nonReentrant returns (uint256 requestId) {
+        return _createRequest(amount, expectedVersion, deadline, maxPricesE18, true);
+    }
+
+    function _createRequest(
+        uint256 amount,
+        bytes32 expectedVersion,
+        uint256 deadline,
+        uint256[] memory maxPricesE18,
+        bool emitPriceLimits
+    ) private returns (uint256 requestId) {
         if (deadline < block.timestamp) revert DeadlineExpired(deadline);
         if (amount == 0) revert InvalidAmount();
 
@@ -165,9 +208,12 @@ contract InvestmentEscrow is ReentrancyGuard {
 
         address[] memory assets = vault.basketAssets();
         uint256 n = assets.length;
+        if (emitPriceLimits && maxPricesE18.length != n) revert PriceLimitsLengthMismatch(n, maxPricesE18.length);
+        if (!emitPriceLimits) maxPricesE18 = new uint256[](n);
         for (uint256 i = 0; i < n; ++i) {
             if (!registry.canOpenExposure(assets[i])) revert AssetNotOpen(assets[i]);
         }
+        _validatePriceLimits(amount, assets, maxPricesE18);
 
         requestId = nextRequestId++;
         Request storage request = _requests[requestId];
@@ -177,9 +223,11 @@ contract InvestmentEscrow is ReentrancyGuard {
         request.deposited = amount;
         request.available = amount;
         _requestAssets[requestId] = assets;
+        _requestPriceLimits[requestId] = maxPricesE18;
 
         _transferFromExact(settlement, msg.sender, amount);
         emit RequestCreated(requestId, msg.sender, currentVersion, amount, assets);
+        if (emitPriceLimits) emit RequestPriceLimitsSet(requestId, maxPricesE18);
     }
 
     /// @notice Buys exactly one current request-basket asset through its registry route.
@@ -210,6 +258,10 @@ contract InvestmentEscrow is ReentrancyGuard {
             price * (10 ** uint256(vault.settlementDecimals())) * BPS_DENOMINATOR,
             Math.Rounding.Ceil
         );
+        uint256 maxPriceE18 = _requestPriceLimits[requestId][index];
+        if (maxPriceE18 != 0) {
+            minOut = Math.max(minOut, _priceLimitMinOut(amount, config.decimals, maxPriceE18));
+        }
         if (minOut == 0) revert ZeroMinOut(asset, amount);
 
         uint256 settlementBefore = settlement.balanceOf(address(this));
@@ -363,6 +415,37 @@ contract InvestmentEscrow is ReentrancyGuard {
         }
         request.status = RequestStatus.Closed;
         emit RequestClosed(requestId, request.owner);
+    }
+
+    /// @dev Bounds user-supplied prices before their denominator is multiplied by settlement decimals in a fill.
+    /// A lower bound also guarantees the whole request can be quoted without Math.mulDiv overflowing.
+    function _validatePriceLimits(uint256 amount, address[] memory assets, uint256[] memory maxPricesE18) private view {
+        uint256 settlementScale = 10 ** uint256(vault.settlementDecimals());
+        uint256 maximumPriceE18 = type(uint256).max / settlementScale;
+        for (uint256 i = 0; i < maxPricesE18.length; ++i) {
+            uint256 maxPriceE18 = maxPricesE18[i];
+            if (maxPriceE18 == 0) continue;
+            uint256 tokenScale = 10 ** uint256(registry.assetConfig(assets[i]).decimals);
+            uint256 minimumPriceE18 = Math.ceilDiv(
+                amount.mulDiv(tokenScale * 1e18, type(uint256).max, Math.Rounding.Ceil), settlementScale
+            );
+            if (maxPriceE18 < minimumPriceE18 || maxPriceE18 > maximumPriceE18) {
+                revert UnsafePriceLimit(i, maxPriceE18, minimumPriceE18, maximumPriceE18);
+            }
+        }
+    }
+
+    /// @dev Token units required for a buy whose all-in settlement price may not exceed maxPriceE18.
+    function _priceLimitMinOut(uint256 amount, uint8 assetDecimals, uint256 maxPriceE18)
+        private
+        view
+        returns (uint256)
+    {
+        return amount.mulDiv(
+            (10 ** uint256(assetDecimals)) * 1e18,
+            maxPriceE18 * (10 ** uint256(vault.settlementDecimals())),
+            Math.Rounding.Ceil
+        );
     }
 
     /// @dev Caps each purchase by the request's still-personal acquisition budget. This is kept in

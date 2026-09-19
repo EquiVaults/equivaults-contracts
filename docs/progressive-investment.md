@@ -43,6 +43,31 @@ route or current configuration and need no keeper. They still require the token 
 permit transfers and the wallet to pay transaction gas. A request closes only after all its
 personal balances are zero. Already minted shares use the normal vault withdrawal API.
 
+## Optional personal purchase ceilings
+
+The additive `priceLimitsVersion() == 1` interface keeps `protocolVersion() == 2` and the
+existing `Request` tuple unchanged. It is advertised separately in the integration manifest;
+old v2 deployments do not acquire this capability automatically.
+
+`createRequestWithLimits(amount, expectedVersion, deadline, maxPricesE18)` freezes one absolute
+maximum purchase price per basket asset, in request asset order. Each price is settlement units
+per whole token scaled by 1e18; zero disables that personal ceiling. The client displays a fresh
+oracle reference and the selected premium before consent (for example, 100 with +2% means 102).
+The contract stores the explicitly consented ceiling, not a moving percentage of future prices.
+`getRequestPriceLimits(id)` and `RequestPriceLimitsSet` expose the stored values. The original
+`createRequest` remains available without personal ceilings.
+
+For each fill, the measured token output must satisfy both the existing vault/oracle bound and
+`ceil(amount * 10**assetDecimals * 1e18 / (10**settlementDecimals * maxPriceE18))`. Thus the actual
+purchase price, including swap fees, cannot exceed the ceiling. No sponsor or route can override
+it. Gas is separate. A rejected fill leaves that transaction unchanged; previously acquired
+assets may still integrate. Stop/claim do not read these prices and remain available.
+
+Limits are immutable for a funded request: stop and create a new request to change them. They
+protect execution prices, not future valuation, oracle quality or exit liquidity. The transaction
+`deadline` remains a consent deadline, not a lifetime or expiry for the investment. The current
+local sponsor reports a rejected price-constrained fill as waiting for market conditions.
+
 ## Admission and mint
 
 The basket remains limited to five assets. For positive supply `S`, shared token quantities
