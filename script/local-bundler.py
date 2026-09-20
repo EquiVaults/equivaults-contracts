@@ -18,6 +18,7 @@ from pathlib import Path
 CHAIN_ID = 31337
 ZERO = '0x' + '0' * 40
 USER_OP_EVENT = '0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f'
+VAULT_CREATED = '0x32c459f0706c3a07f3800e0e0366fbb8ecffedf431250fdf6a59e9fd5c7f20c4'
 ADDR = re.compile(r'0x[0-9a-fA-F]{40}$')
 HEX = re.compile(r'0x(?:[0-9a-fA-F]{2})*$')
 
@@ -99,7 +100,9 @@ def packed_op(op):
 
 def get_user_op_hash_data(op):
     _, encoded = packed_op(op)
-    return '0x' + (selector('getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))') + encoded).hex()
+    # A tuple containing dynamic members is itself dynamic: the sole argument
+    # head points at the tuple body, which starts after that 32-byte head.
+    return '0x' + (selector('getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))') + word(32) + encoded).hex()
 
 
 def handle_ops_data(op, beneficiary):
@@ -140,22 +143,42 @@ class Store:
         try: fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self.lock.close(); raise BundlerError('state_db_locked')
-        self.db = sqlite3.connect(self.path)
+        self.guard = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.execute('pragma journal_mode=WAL'); self.db.execute('pragma synchronous=FULL')
         self.db.executescript('create table if not exists meta(k text primary key,v text); create table if not exists ops(hash text primary key,sender text,nonce text,body text,state text,txhash text,block text,blockhash text, unique(sender,nonce));')
         self.db.commit()
 
     def value(self, key):
-        row = self.db.execute('select v from meta where k=?', (key,)).fetchone(); return row[0] if row else None
+        with self.guard:
+            row = self.db.execute('select v from meta where k=?', (key,)).fetchone(); return row[0] if row else None
     def set(self, key, value):
-        self.db.execute('insert into meta values(?,?) on conflict(k) do update set v=excluded.v', (key, str(value))); self.db.commit()
-    def get(self, op_hash): return self.db.execute('select sender,nonce,body,state,txhash,block,blockhash from ops where hash=?', (op_hash,)).fetchone()
-    def by_nonce(self, sender, nonce): return self.db.execute('select hash,body,state from ops where sender=? and nonce=?', (sender, str(nonce))).fetchone()
+        with self.guard:
+            self.db.execute('insert into meta values(?,?) on conflict(k) do update set v=excluded.v', (key, str(value))); self.db.commit()
+    def get(self, op_hash):
+        with self.guard: return self.db.execute('select sender,nonce,body,state,txhash,block,blockhash from ops where hash=?', (op_hash,)).fetchone()
+    def by_nonce(self, sender, nonce):
+        with self.guard: return self.db.execute('select hash,body,state from ops where sender=? and nonce=?', (sender, str(nonce))).fetchone()
     def intent(self, op_hash, sender, nonce, body):
-        self.db.execute('insert into ops values(?,?,?,?,?,?,?,?)', (op_hash, sender, str(nonce), body, 'intent', None, None, None)); self.db.commit()
-    def sent(self, op_hash, txhash): self.db.execute('update ops set state=?,txhash=? where hash=?', ('sent', txhash, op_hash)); self.db.commit()
-    def receipt(self, op_hash, block, blockhash): self.db.execute('update ops set state=?,block=?,blockhash=? where hash=?', ('mined', block, blockhash, op_hash)); self.db.commit()
-    def close(self): self.db.close(); fcntl.flock(self.lock, fcntl.LOCK_UN); self.lock.close()
+        with self.guard:
+            self.db.execute('insert into ops values(?,?,?,?,?,?,?,?)', (op_hash, sender, str(nonce), body, 'intent', None, None, None)); self.db.commit()
+    def reserve(self, op_hash, sender, nonce, body):
+        """Atomically reserve a sender nonce before any external submission."""
+        with self.guard:
+            present = self.db.execute('select body,state from ops where hash=?', (op_hash,)).fetchone()
+            if present:
+                if present[0] != body: raise BundlerError('operation_hash_body_mismatch')
+                if present[1] == 'intent': raise BundlerError('unknown_intent_pause')
+                return False
+            if self.db.execute('select 1 from ops where sender=? and nonce=?', (sender, str(nonce))).fetchone(): raise BundlerError('nonce_already_reserved')
+            self.db.execute('insert into ops values(?,?,?,?,?,?,?,?)', (op_hash, sender, str(nonce), body, 'intent', None, None, None)); self.db.commit(); return True
+    def sent(self, op_hash, txhash):
+        with self.guard: self.db.execute('update ops set state=?,txhash=? where hash=?', ('sent', txhash, op_hash)); self.db.commit()
+    def receipt(self, op_hash, block, blockhash):
+        with self.guard: self.db.execute('update ops set state=?,block=?,blockhash=? where hash=?', ('mined', block, blockhash, op_hash)); self.db.commit()
+    def close(self):
+        with self.guard: self.db.close()
+        fcntl.flock(self.lock, fcntl.LOCK_UN); self.lock.close()
 
 
 class Bundler:
@@ -178,8 +201,32 @@ class Bundler:
     def authenticate(self):
         if integer(self.rpc.call('eth_chainId', [])) != CHAIN_ID or 'anvil' not in self.rpc.call('web3_clientVersion', []).lower(): raise BundlerError('anvil_31337_required')
         if self.sender not in [x.lower() for x in self.rpc.call('eth_accounts', [])]: raise BundlerError('sender_not_unlocked')
+        if self.sender == self.executor: raise BundlerError('bundler_sender_must_differ_from_executor')
         if self.runtime_hash(self.entry_point) != self.entry_hash or self.runtime_hash(self.factory) != self.factory_hash: raise BundlerError('published_runtime_mismatch')
         if norm_address('0x' + self.rpc.call('eth_call', [{'to': self.factory, 'data': '0x' + selector('entryPoint()').hex()}, 'latest'])[-40:]) != self.entry_point or norm_address('0x' + self.rpc.call('eth_call', [{'to': self.factory, 'data': '0x' + selector('vaultFactory()').hex()}, 'latest'])[-40:]) != self.vault_factory: raise BundlerError('factory_binding_failed')
+        genesis = self.rpc.call('eth_getBlockByNumber', ['0x0', False])
+        deployment = self.deployment_anchor()
+        namespace = json.dumps(self.context(genesis['hash'], deployment), sort_keys=True)
+        old = self.db.value('namespace')
+        if old and old != namespace: raise BundlerError('state_namespace_mismatch')
+        self.db.set('namespace', namespace)
+        self.db.set('genesis', genesis['hash'])
+        self.db.set('deployment', json.dumps(deployment, sort_keys=True))
+
+    def deployment_anchor(self):
+        logs = self.rpc.call('eth_getLogs', [{'address': self.vault_factory, 'fromBlock': '0x0', 'toBlock': 'latest', 'topics': [VAULT_CREATED]}])
+        if not logs: raise BundlerError('primary_entry_missing')
+        first = min(logs, key=lambda log: integer(log['blockNumber']))
+        block = self.rpc.call('eth_getBlockByNumber', [first['blockNumber'], False])
+        if not block: raise BundlerError('deployment_anchor_missing')
+        return {'deploymentBlock': first['blockNumber'], 'deploymentBlockHash': block['hash']}
+
+    def context(self, genesis_hash, deployment=None):
+        deployment = deployment or json.loads(self.db.value('deployment'))
+        return {'chainId': CHAIN_ID, 'genesisHash': genesis_hash, 'entryPoint': self.entry_point,
+                'factory': self.factory, 'entryPointCodeHash': self.entry_hash,
+                'factoryCodeHash': self.factory_hash, 'executor': self.executor,
+                'bundlerSender': self.sender, 'bundler': 'http://127.0.0.1:' + str(self.a.port), **deployment}
 
     def validate(self, op):
         op, _ = packed_op(op)
@@ -211,14 +258,7 @@ class Bundler:
         hash_data = get_user_op_hash_data(op)
         op_hash = norm_hex(self.rpc.call('eth_call', [{'to': self.entry_point, 'data': hash_data}, 'latest']), 32)
         body = json.dumps(op, sort_keys=True, separators=(',', ':'))
-        present = self.db.get(op_hash)
-        if present:
-            if present[2] != body: raise BundlerError('operation_hash_body_mismatch')
-            if present[3] == 'intent': raise BundlerError('unknown_intent_pause')
-            return op_hash
-        other = self.db.by_nonce(op['sender'], op['nonce'])
-        if other: raise BundlerError('nonce_already_reserved')
-        self.db.intent(op_hash, op['sender'], op['nonce'], body)
+        if not self.db.reserve(op_hash, op['sender'], op['nonce'], body): return op_hash
         try: txhash = self.rpc.call('eth_sendTransaction', [{'from': self.sender, 'to': self.entry_point, 'data': data, 'gas': gas}])
         except Exception as exc: raise BundlerError('unknown_intent_pause') from exc
         self.db.sent(op_hash, norm_hex(txhash, 32)); return op_hash
@@ -232,7 +272,9 @@ class Bundler:
             canonical = self.rpc.call('eth_getBlockByNumber', [block, False])
             if not canonical or canonical['hash'].lower() != blockhash.lower(): raise BundlerError('receipt_reorg_pause')
         receipt = self.rpc.call('eth_getTransactionReceipt', [txhash])
-        if not receipt: return None
+        if not receipt:
+            if state == 'mined': raise BundlerError('receipt_reorg_pause')
+            return None
         canonical = self.rpc.call('eth_getBlockByNumber', [receipt['blockNumber'], False])
         if not canonical or canonical['hash'].lower() != receipt['blockHash'].lower(): raise BundlerError('receipt_reorg_pause')
         # UserOperationEvent topic0 is intentionally checked by hash in addition to
@@ -260,6 +302,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0')))); method, params = request['method'], request.get('params', [])
             if method == 'eth_supportedEntryPoints': result = [self.bundler.entry_point]
             elif method == 'eth_chainId': result = hex(CHAIN_ID)
+            elif method == 'eq_executionContext':
+                self.bundler.authenticate(); result = self.bundler.context(self.bundler.db.value('genesis'))
             elif method == 'eth_sendUserOperation':
                 if len(params) != 2 or norm_address(params[1]) != self.bundler.entry_point: raise BundlerError('entrypoint_mismatch')
                 result = self.bundler.submit(params[0])

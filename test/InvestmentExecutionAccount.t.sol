@@ -252,7 +252,7 @@ contract InvestmentExecutionAccountTest is Test {
                 account,
                 abi.encodeCall(InvestmentExecutionAccount.executeFill, (0, 50 * UNIT, 99, block.timestamp + 1 days)),
                 account.policyEpoch(),
-                uint64(i),
+                0, // Each policy epoch has an independent EntryPoint nonce sequence.
                 EXECUTOR_KEY
             );
             _handle(stale);

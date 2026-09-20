@@ -10,6 +10,11 @@ personal escrow requests, bounded purchases, complete proportional integration a
 stop/claims. It does not upgrade existing vaults. Follow the local publication runbook before
 enabling a client against a generated fixture.
 
+Progressive automation now supports [investor-funded execution](docs/investor-funded-execution.md):
+a separate capped native budget per request, signed ERC-4337 operations, a pause after failed
+execution, and independent owner recovery. The local executor and bundler are test infrastructure;
+there is no protocol subsidy, shared investor fee reserve or production bundler qualification.
+
 ## Verification
 
 Foundry 1.7.1, Solidity 0.8.30, pinned Git submodules, optimizer and via-IR:

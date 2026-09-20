@@ -19,22 +19,32 @@
   "poolB": "0x322813fd9a801c5507c9de605d63cea4f2ce6c44",
   "registry": "0xa85233c63b9ee964add6f2cffe00fd84eb32338f",
   "factory": "0x09635f643e140090a9a8dcd712ed6285858cebef",
-  "legacyFactory": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
-  "engine": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
+  "legacyFactory": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
+  "engine": "0x9e545e3c0baab3e08cdfd552c960a1050f373042",
+  "entryPoint": "0xc5a5c42992decbae36851359345fe25997f5c42d",
+  "executionFactory": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
   "exampleVault": "0xe73bc5bd4763a3307ab5f8f126634b7e12e3da9b",
-  "legacyExampleVault": "0xfbd745797a0fb50429f0a2b04581092798fdf30b",
+  "legacyExampleVault": "0xa37ae2b259d35af4abdde122ec90b204323ed304",
   "factories": [
     {
       "address": "0x09635f643e140090a9a8dcd712ed6285858cebef",
       "protocolVersion": 2,
-      "codeHash": "0x68e01fb271a7f2f15813a6f4ec5826e1656fc4a6a72ce3cce91124a4ca0bed2c",
-      "contractsCommit": "79148e699fb4d8ccecd9df1f17986d225c057dcc"
+      "codeHash": "0x4fac2a202befe68c96c2c6f45171f79d23b2cf5a14879fe83721d94e37f6b57d",
+      "contractsCommit": "8e6332eeef63335308c2a77c6772d30556bc9248"
     },
     {
-      "address": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
+      "address": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
       "protocolVersion": 1,
-      "codeHash": "0xb4e081d650f0e9166f27c9795edde0a3a6fbbc4a47375667b76c8eb39b556734",
+      "codeHash": "0xfb6e9bf398f9be9a2b2dd44082cfb1ef3362253d4fa0243ec0c255af4717a2f4",
       "contractsCommit": "c2f5605aec16d4121bd2c43354d7effef81cee95"
     }
-  ]
+  ],
+  "execution": {
+    "version": 1,
+    "entryPoint": "0xc5a5c42992decbae36851359345fe25997f5c42d",
+    "factory": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
+    "executor": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
+    "entryPointCodeHash": "0x519d97dca9d1707d49f8d738e9f7e26f58bf456ccdb74e8210dfa4cc71454598",
+    "factoryCodeHash": "0xfd542a5cc6c1b2a379018e959bac6ffa13647ac3b2aa81c642d8dcf95cb8ff55"
+  }
 }

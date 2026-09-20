@@ -35,17 +35,29 @@ class ExecutionStore:
         try: fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self.lock.close(); raise RuntimeError('state_db_locked')
-        self.db = sqlite3.connect(self.path); self.db.execute('pragma journal_mode=WAL'); self.db.execute('pragma synchronous=FULL')
+        self.guard = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False); self.db.execute('pragma journal_mode=WAL'); self.db.execute('pragma synchronous=FULL')
         self.db.executescript('create table if not exists meta(k text primary key,v text); create table if not exists ops(account text,nonce text,hash text,body text,state text,block text,blockhash text, unique(account,nonce));')
         self.db.commit()
     def value(self, key):
-        row = self.db.execute('select v from meta where k=?', (key,)).fetchone(); return row[0] if row else None
-    def set(self, key, value): self.db.execute('insert into meta values(?,?) on conflict(k) do update set v=excluded.v', (key, str(value))); self.db.commit()
-    def pending(self): return self.db.execute("select account,nonce,hash from ops where state in ('intent','sent')").fetchall()
-    def intent(self, account, nonce, body): self.db.execute('insert into ops values(?,?,?,?,?,?,?)', (account, str(nonce), None, body, 'intent', None, None)); self.db.commit()
-    def sent(self, nonce, op_hash): self.db.execute('update ops set hash=?,state=? where nonce=?', (op_hash, 'sent', str(nonce))); self.db.commit()
-    def settled(self, nonce, block, blockhash): self.db.execute('update ops set state=?,block=?,blockhash=? where nonce=?', ('mined', block, blockhash, str(nonce))); self.db.commit()
-    def close(self): self.db.close(); fcntl.flock(self.lock, fcntl.LOCK_UN); self.lock.close()
+        with self.guard:
+            row = self.db.execute('select v from meta where k=?', (key,)).fetchone(); return row[0] if row else None
+    def set(self, key, value):
+        with self.guard: self.db.execute('insert into meta values(?,?) on conflict(k) do update set v=excluded.v', (key, str(value))); self.db.commit()
+    def tracked(self):
+        with self.guard: return self.db.execute("select account,nonce,hash,state from ops where state in ('intent','sent','mined')").fetchall()
+    def pending(self):
+        """Compatibility view used by diagnostics; includes only unresolved intents."""
+        with self.guard: return self.db.execute("select account,nonce,hash from ops where state in ('intent','sent')").fetchall()
+    def intent(self, account, nonce, body):
+        with self.guard: self.db.execute('insert into ops values(?,?,?,?,?,?,?)', (account, str(nonce), None, body, 'intent', None, None)); self.db.commit()
+    def sent(self, account, nonce, op_hash):
+        with self.guard: self.db.execute('update ops set hash=?,state=? where account=? and nonce=?', (op_hash, 'sent', account, str(nonce))); self.db.commit()
+    def settled(self, account, nonce, block, blockhash):
+        with self.guard: self.db.execute('update ops set state=?,block=?,blockhash=? where account=? and nonce=?', ('mined', block, blockhash, account, str(nonce))); self.db.commit()
+    def close(self):
+        with self.guard: self.db.close()
+        fcntl.flock(self.lock, fcntl.LOCK_UN); self.lock.close()
 
 
 class Executor:
@@ -53,10 +65,11 @@ class Executor:
         self.a = args; self.rpc = sponsor.Rpc(args.rpc_url); self.db = ExecutionStore(args.state_db)
         self.status = sponsor.Status(0, args.sender); self.status.base['funding'] = 'investor'
         self.stop = threading.Event(); self.cursor_vault = int(self.db.value('cursor_vault') or 0); self.cursor_request = json.loads(self.db.value('cursor_request') or '{}')
-        catalog = json.loads(Path(args.addresses).read_text()); self.catalog = catalog
+        catalog = json.loads(Path(args.addresses).read_text()); self.catalog = catalog; self.manifest = json.loads(Path(args.manifest).read_text())
         ex = catalog.get('execution') or {}; self.entry_point = bundler.norm_address(ex.get('entryPoint')); self.execution_factory = bundler.norm_address(ex.get('factory'))
         self.entry_hash = bundler.norm_hex(ex.get('entryPointCodeHash'), 32); self.execution_hash = bundler.norm_hex(ex.get('factoryCodeHash'), 32)
         self.factory = bundler.norm_address(catalog['factory']); self.sender = bundler.norm_address(args.sender)
+        self.bundler_sender = bundler.norm_address(args.bundler_sender); self.catalog_executor = bundler.norm_address(ex.get('executor'))
 
     def runtime_hash(self, value): return subprocess.check_output(['cast', 'keccak', self.rpc.call('eth_getCode', [value, 'latest'])], text=True, timeout=10).strip().lower()
     def call(self, target, signature, block, *values): return self.rpc.read(target, sponsor.calldata(signature, *values), block)
@@ -66,39 +79,67 @@ class Executor:
     def authenticate(self):
         parsed = urllib.parse.urlparse(self.a.bundler_url)
         if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1') or parsed.username or parsed.password: raise sponsor.Pause('bundler_not_loopback')
+        if self.sender != self.catalog_executor: raise sponsor.Pause('executor_catalog_binding_failed')
+        if self.sender == self.bundler_sender: raise sponsor.Pause('bundler_sender_must_differ_from_executor')
         if sponsor.integer(self.rpc.call('eth_chainId', [])) != CHAIN_ID or 'anvil' not in self.rpc.call('web3_clientVersion', []).lower(): raise sponsor.Pause('anvil_31337_required')
         if self.sender not in [x.lower() for x in self.rpc.call('eth_accounts', [])]: raise sponsor.Pause('sender_not_unlocked')
         if self.runtime_hash(self.entry_point) != self.entry_hash or self.runtime_hash(self.execution_factory) != self.execution_hash: raise sponsor.Pause('execution_runtime_mismatch')
         if self.addr(self.execution_factory, 'entryPoint()', 'latest') != self.entry_point or self.addr(self.execution_factory, 'vaultFactory()', 'latest') != self.factory: raise sponsor.Pause('execution_factory_binding_failed')
         primary = next((x for x in self.catalog.get('factories', []) if x.get('address', '').lower() == self.factory), None)
-        if not primary or self.runtime_hash(self.factory) != primary.get('codeHash', '').lower(): raise sponsor.Pause('factory_catalog_auth_failed')
+        if not primary or primary.get('contractsCommit') != self.manifest.get('contractsCommit') or self.runtime_hash(self.factory) != primary.get('codeHash', '').lower(): raise sponsor.Pause('factory_catalog_auth_failed')
         genesis = self.rpc.call('eth_getBlockByNumber', ['0x0', False])
-        namespace = json.dumps({'chain': CHAIN_ID, 'genesis': genesis['hash'], 'factory': self.factory, 'entryPoint': self.entry_point, 'executionFactory': self.execution_factory, 'operator': self.sender, 'bundler': self.a.bundler_url}, sort_keys=True)
+        deployment = self.deployment_anchor()
+        expected = {'chainId': CHAIN_ID, 'genesisHash': genesis['hash'], 'entryPoint': self.entry_point,
+                    'factory': self.execution_factory, 'entryPointCodeHash': self.entry_hash,
+                    'factoryCodeHash': self.execution_hash, 'executor': self.catalog_executor,
+                    'bundlerSender': self.bundler_sender,
+                    'bundler': 'http://127.0.0.1:' + str(parsed.port), **deployment}
+        if self.bundler_rpc('eq_executionContext', []) != expected: raise sponsor.Pause('bundler_identity_mismatch')
+        namespace = json.dumps({**expected, 'operator': self.sender, 'bundler': self.a.bundler_url}, sort_keys=True)
         old = self.db.value('namespace')
         if old and old != namespace: raise sponsor.Pause('state_namespace_mismatch')
         self.db.set('namespace', namespace)
-        self.status.base.update(factory=self.factory, genesisHash=genesis['hash'])
+        self.status.base.update(factory=self.factory, genesisHash=genesis['hash'], deploymentBlock=str(sponsor.integer(deployment['deploymentBlock'])), deploymentBlockHash=deployment['deploymentBlockHash'], contractsCommit=self.manifest['contractsCommit'])
+
+    def deployment_anchor(self):
+        logs = self.rpc.call('eth_getLogs', [{'address': self.factory, 'fromBlock': '0x0', 'toBlock': 'latest', 'topics': [sponsor.VAULT_CREATED]}])
+        if not logs: raise sponsor.Pause('primary_entry_missing')
+        first = min(logs, key=lambda log: sponsor.integer(log['blockNumber']))
+        block = self.rpc.call('eth_getBlockByNumber', [first['blockNumber'], False])
+        if not block: raise sponsor.Pause('deployment_anchor_missing')
+        return {'deploymentBlock': first['blockNumber'], 'deploymentBlockHash': block['hash']}
 
     def bundler_rpc(self, method, params):
         try:
             request = urllib.request.Request(self.a.bundler_url, json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(), {'Content-Type':'application/json'})
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10) as response: reply = json.load(response)
         except Exception as exc: raise sponsor.RpcTransportError('bundler_unavailable') from exc
-        if reply.get('error'): raise sponsor.RpcTransportError('bundler_rejected')
+        if reply.get('error'):
+            reason = str(reply['error'].get('message', 'bundler_rejected')) if isinstance(reply['error'], dict) else 'bundler_rejected'
+            if reason in ('receipt_reorg_pause', 'unknown_intent_pause'):
+                raise sponsor.Pause(reason)
+            raise sponsor.RpcTransportError('bundler_rejected')
         return reply['result']
 
     def reconcile(self):
         if self.db.value('halt'): raise sponsor.Pause(self.db.value('halt'))
-        for account, nonce, op_hash in self.db.pending():
+        for account, nonce, op_hash, state in self.db.tracked():
             if not op_hash:
                 self.db.set('halt', 'unknown_intent_pause'); raise sponsor.Pause('unknown_intent_pause')
-            receipt = self.bundler_rpc('eth_getUserOperationReceipt', [op_hash])
-            if not receipt: raise sponsor.Pause('pending_receipt_pause')
+            try:
+                receipt = self.bundler_rpc('eth_getUserOperationReceipt', [op_hash])
+            except sponsor.Pause as error:
+                if str(error) == 'receipt_reorg_pause': self.db.set('halt', 'receipt_reorg_pause')
+                raise
+            if not receipt:
+                if state == 'mined':
+                    self.db.set('halt', 'receipt_reorg_pause'); raise sponsor.Pause('receipt_reorg_pause')
+                raise sponsor.Pause('pending_receipt_pause')
             outer = receipt.get('receipt') or {}
             canonical = self.rpc.call('eth_getBlockByNumber', [outer.get('blockNumber'), False])
             if not canonical or canonical['hash'].lower() != outer.get('blockHash', '').lower():
                 self.db.set('halt', 'receipt_reorg_pause'); raise sponsor.Pause('receipt_reorg_pause')
-            self.db.settled(nonce, outer['blockNumber'], outer['blockHash'])
+            self.db.settled(account, nonce, outer['blockNumber'], outer['blockHash'])
 
     def account_info(self, account, tag):
         raw = self.call(account, 'policy()', tag)[2:]
@@ -109,7 +150,7 @@ class Executor:
     def request_item(self, vault, escrow, rid, tag):
         raw = self.call(escrow, 'getRequest(uint256)', tag, rid)[2:]; words = [raw[i:i+64] for i in range(0, len(raw), 64)]
         if len(words) != 10: return None
-        return {'vault':vault, 'escrow':escrow, 'requestId':str(rid), 'owner':sponsor.address(words[0]), 'version':'0x'+words[1], 'sequence':str(sponsor.integer('0x'+words[2])), 'closed':sponsor.integer('0x'+words[3]), 'available':sponsor.integer('0x'+words[5])}
+        return {'vault':vault, 'escrow':escrow, 'requestId':str(rid), 'owner':sponsor.address(words[0]), 'version':'0x'+words[1], 'sequence':str(sponsor.integer('0x'+words[2])), 'closed':sponsor.integer('0x'+words[3]), 'available':sponsor.integer('0x'+words[5]), 'lastTxHash':None}
 
     def report(self, item, state, reason):
         item.update(state=state, reason=reason, updatedAt=sponsor.now_ms()); self.status.request(item)
@@ -155,13 +196,13 @@ class Executor:
             self.db.set('halt', 'unknown_intent_pause'); raise sponsor.Pause('unknown_intent_pause') from exc
         if bundler.norm_hex(result, 32) != op_hash:
             self.db.set('halt', 'userop_hash_mismatch_pause'); raise sponsor.Pause('userop_hash_mismatch_pause')
-        self.db.sent(nonce, op_hash); return op_hash
+        self.db.sent(info['account'], nonce, op_hash); return op_hash
 
     def try_request(self, vault, escrow, rid, tag, block):
         item = self.request_item(vault, escrow, rid, tag)
         if not item: return False
         if item['closed']:
-            self.report(item, 'closed', None); return False
+            self.report(item, 'stopped' if item['closed'] == 1 else 'closed', None); return False
         account = self.addr(self.execution_factory, 'accounts(address,uint256)', tag, escrow, rid)
         if account == '0x'+'0'*40:
             self.report(item, 'waiting_operator', 'execution_budget_required'); return False
@@ -182,7 +223,7 @@ class Executor:
         if wrapped == 'min_fill': self.report(item, 'waiting_operator', 'execution_budget_required'); return False
         canonical = self.rpc.call('eth_getBlockByNumber', [tag, False])
         if not canonical or canonical['hash'].lower() != block['hash'].lower(): raise sponsor.Pause('snapshot_reorg_pause')
-        item['lastUserOpHash'] = self.submit(item, info, wrapped, tag); self.report(item, 'executing', None); return True
+        self.submit(item, info, wrapped, tag); self.report(item, 'executing', None); return True
 
     def cycle(self):
         self.reconcile(); block = self.rpc.call('eth_getBlockByNumber', ['latest', False]); tag = block['number']
@@ -214,7 +255,7 @@ class Executor:
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__); p.add_argument('--rpc-url',required=True); p.add_argument('--sender',required=True); p.add_argument('--state-db',required=True); p.add_argument('--status-port',type=int,required=True); p.add_argument('--bundler-url',required=True); p.add_argument('--max-fill',type=int,required=True); p.add_argument('--interval',type=float,default=.5); p.add_argument('--addresses',default='deployments/31337/addresses.json'); p.add_argument('--manifest',default='deployments/manifest.json'); p.add_argument('--once',action='store_true')
+    p=argparse.ArgumentParser(description=__doc__); p.add_argument('--rpc-url',required=True); p.add_argument('--sender',required=True); p.add_argument('--state-db',required=True); p.add_argument('--status-port',type=int,required=True); p.add_argument('--bundler-url',required=True); p.add_argument('--bundler-sender',default='0x14dC79964da2C08b23698b3D3cc7Ca32193d9955'); p.add_argument('--max-fill',type=int,required=True); p.add_argument('--interval',type=float,default=.5); p.add_argument('--addresses',default='deployments/31337/addresses.json'); p.add_argument('--manifest',default='deployments/manifest.json'); p.add_argument('--once',action='store_true')
     a=p.parse_args()
     if a.max_fill <= 0 or not 1 <= a.status_port <= 65535 or a.interval <= 0: p.error('unsafe bounds')
     daemon=Executor(a)

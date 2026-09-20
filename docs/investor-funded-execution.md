@@ -84,3 +84,26 @@ bundler still require qualification before any real-funds deployment.
 The old `sponsor-daemon.py` remains a historical, explicitly invoked local test
 harness. It is not the default runtime for investor-funded automation and must not
 be run as a fallback for a missing personal budget.
+
+## Start the local services
+
+Use the addresses and manifest for the same verified deployment. Choose unused loopback ports
+and separate new state databases. Stop the old sponsor for that deployment first; do not run
+both schedulers. These examples use only public, unlocked Anvil fixture accounts:
+
+```sh
+python3 script/local-bundler.py --rpc-url http://127.0.0.1:19545 \
+  --addresses deployments/31337/addresses.json --manifest deployments/manifest.json \
+  --sender 0x14dC79964da2C08b23698B3D3cc7Ca32193d9955 \
+  --state-db .local-demo/bundler.sqlite --port 19790
+python3 script/investor-executor.py --rpc-url http://127.0.0.1:19545 \
+  --addresses deployments/31337/addresses.json --manifest deployments/manifest.json \
+  --sender 0x976EA74026E726554dB657fA54763abd0C3a0aa9 \
+  --state-db .local-demo/investor-executor.sqlite --status-port 19789 \
+  --bundler-url http://127.0.0.1:19790 --max-fill 50000000 --interval 5
+```
+
+The app API reads status through `SPONSOR_STATUS_URL`; this legacy configuration name does
+not mean the operator funds purchases. Preserve both journals across restart. An uncertain send,
+chain identity mismatch or canonical block change requires investigation; do not delete the
+journal or reset the chain to bypass the stop. Budget recovery remains an owner wallet action.
