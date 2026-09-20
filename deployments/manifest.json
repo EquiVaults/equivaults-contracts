@@ -8,19 +8,27 @@
       "personalPriceLimits": {
         "enabled": true,
         "version": 1
+      },
+      "investorFundedExecution": {
+        "enabled": true,
+        "version": 1,
+        "entryPointVersion": "0.9"
       }
     }
   },
-  "contractsCommit": "79148e699fb4d8ccecd9df1f17986d225c057dcc",
-  "generatedAt": "2026-09-19",
+  "contractsCommit": "7cd22e8614bedda9a33e0ebf89ee6b4307d54d52",
+  "generatedAt": "2026-09-20",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",
+    "EntryPoint.json",
     "EquiVault.json",
     "IERC20.json",
     "IPriceOracle.json",
     "ISwapRouter.json",
     "InvestmentEscrow.json",
+    "InvestmentExecutionAccount.json",
+    "InvestmentExecutionFactory.json",
     "RebalanceEngine.json",
     "VaultFactory.json"
   ],

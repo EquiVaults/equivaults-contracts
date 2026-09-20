@@ -94,6 +94,13 @@ for chain_id, chain in chains.items():
     for field in CORE_ADDRESS_FIELDS:
         require(ADDRESS_RE.fullmatch(addresses.get(field, "")) is not None, f"invalid {field} in {address_file}")
 
+    execution = addresses.get("execution", {})
+    require(execution.get("version") == 1, "missing investor-funded execution deployment")
+    for field in ("entryPoint", "factory", "executor"):
+        require(ADDRESS_RE.fullmatch(execution.get(field, "")) is not None and int(execution[field], 16) != 0, f"invalid execution {field}")
+    for field in ("entryPointCodeHash", "factoryCodeHash"):
+        require(HASH_RE.fullmatch(execution.get(field, "")) is not None, f"invalid execution {field}")
+
     factories = addresses.get("factories")
     require(isinstance(factories, list) and len(factories) == 2, f"invalid factories catalog in {address_file}")
     by_version = {entry.get("protocolVersion"): entry for entry in factories if isinstance(entry, dict)}
@@ -126,6 +133,13 @@ for chain_id, chain in chains.items():
             code = subprocess.check_output(["cast", "code", "--rpc-url", rpc_url, entry["address"]], text=True).strip()
             actual_hash = subprocess.check_output(["cast", "keccak", code], text=True).strip().lower()
             require(actual_hash == entry["codeHash"].lower(), f"on-chain code hash mismatch for v{entry['protocolVersion']} factory")
+        for field, hash_field in (("entryPoint", "entryPointCodeHash"), ("factory", "factoryCodeHash")):
+            code = subprocess.check_output(["cast", "code", "--rpc-url", rpc_url, execution[field]], text=True).strip()
+            actual = subprocess.check_output(["cast", "keccak", code], text=True).strip().lower()
+            require(code != "0x" and actual == execution[hash_field].lower(), f"execution {field} runtime mismatch")
+        for signature, expected in (("entryPoint()(address)", execution["entryPoint"]), ("vaultFactory()(address)", addresses["factory"])):
+            actual = subprocess.check_output(["cast", "call", execution["factory"], signature, "--rpc-url", rpc_url], text=True).strip()
+            require(actual.lower() == expected.lower(), f"execution factory {signature} binding mismatch")
         escrow = subprocess.check_output(["cast", "call", addresses["exampleVault"], "investmentEscrow()(address)", "--rpc-url", rpc_url], text=True).strip()
         price_limits_version = subprocess.check_output(["cast", "call", escrow, "priceLimitsVersion()(uint256)", "--rpc-url", rpc_url], text=True).strip()
         require(price_limits_version == "1", "deployed escrow does not advertise price-limit version 1")

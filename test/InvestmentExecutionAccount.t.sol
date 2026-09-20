@@ -15,6 +15,19 @@ import {PackedUserOperation} from "../lib/account-abstraction/contracts/interfac
 import {EntryPoint} from "../lib/account-abstraction/contracts/core/EntryPoint.sol";
 import {MockOracle, MockOracleRoute, MockToken} from "./mocks/Mocks.sol";
 
+/// @dev Mimics the first ABI selector of an escrow while pointing at a genuine registered vault.
+contract ImpostorEscrow {
+    address private immutable _vault;
+
+    constructor(address vault_) {
+        _vault = vault_;
+    }
+
+    function vault() external view returns (address) {
+        return _vault;
+    }
+}
+
 contract InvestmentExecutionAccountTest is Test {
     using MessageHashUtils for bytes32;
 
@@ -30,12 +43,15 @@ contract InvestmentExecutionAccountTest is Test {
     MockToken private settlement;
     MockToken private tokenA;
     MockToken private tokenB;
+    MockOracle private oracleA;
+    MockOracle private oracleB;
     VaultFactory private vaultFactory;
     InvestmentExecutionFactory private accountFactory;
     InvestmentEscrow private escrow;
     address private executor;
 
     function setUp() public {
+        vm.deal(address(this), 10 ether);
         executor = vm.addr(EXECUTOR_KEY);
         vm.deal(ALICE, 10 ether);
         vm.deal(BOB, 10 ether);
@@ -45,8 +61,8 @@ contract InvestmentExecutionAccountTest is Test {
         settlement = new MockToken(6);
         tokenA = new MockToken(18);
         tokenB = new MockToken(18);
-        MockOracle oracleA = new MockOracle();
-        MockOracle oracleB = new MockOracle();
+        oracleA = new MockOracle();
+        oracleB = new MockOracle();
         MockOracleRoute routeA = new MockOracleRoute(registry, settlement, 0);
         MockOracleRoute routeB = new MockOracleRoute(registry, settlement, 0);
         registry.registerAsset(address(tokenA), oracleA, oracleA, address(routeA), 1 days);
@@ -167,6 +183,120 @@ contract InvestmentExecutionAccountTest is Test {
         assertEq(account.policyEpoch(), 2);
     }
 
+    function testFactoryRejectsImpostorEscrowPointingAtARegisteredVault() public {
+        ImpostorEscrow impostor = new ImpostorEscrow(address(escrow.vault()));
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(InvestmentExecutionFactory.InvalidEscrow.selector, address(impostor)));
+        accountFactory.createAccount{value: 1 ether}(address(impostor), 1, executor, _policy());
+    }
+
+    function testSignedGasAndCallDataPolicyViolationsRejectWithoutAccountDebit() public {
+        uint256 requestId = _request(ALICE);
+        InvestmentExecutionAccount account = _account(ALICE, requestId, 1 ether);
+        bytes memory fill = abi.encodeCall(InvestmentExecutionAccount.executeFill, (0, 50 * UNIT, 0, block.timestamp + 1 days));
+
+        PackedUserOperation memory operation = _operation(account, fill, 0, 0, EXECUTOR_KEY);
+        operation.preVerificationGas = 1;
+        _resign(operation, EXECUTOR_KEY);
+        _rejectWithoutDebit(account, operation);
+
+        operation = _operation(account, fill, 0, 0, EXECUTOR_KEY);
+        operation.gasFees = bytes32((uint256(2 gwei) << 128) | 1 gwei);
+        _resign(operation, EXECUTOR_KEY);
+        _rejectWithoutDebit(account, operation);
+
+        operation = _operation(account, fill, 0, 0, EXECUTOR_KEY);
+        operation.gasFees = bytes32((uint256(1 gwei) << 128) | 2 gwei);
+        _resign(operation, EXECUTOR_KEY);
+        _rejectWithoutDebit(account, operation);
+
+        operation = _operation(account, fill, 0, 0, EXECUTOR_KEY);
+        operation.accountGasLimits = bytes32((uint256(250_000) << 128) | 1_000_001);
+        _resign(operation, EXECUTOR_KEY);
+        _rejectWithoutDebit(account, operation);
+
+        operation = _operation(account, abi.encodeCall(InvestmentExecutionAccount.withdrawBudget, (0)), 0, 0, EXECUTOR_KEY);
+        _rejectWithoutDebit(account, operation);
+    }
+
+    function testLowCallGasChargesOnlyTheFailingAccountAndLeavesItPaused() public {
+        uint256 aliceRequest = _request(ALICE);
+        uint256 bobRequest = _request(BOB);
+        InvestmentExecutionAccount aliceAccount = _account(ALICE, aliceRequest, 1 ether);
+        InvestmentExecutionAccount bobAccount = _account(BOB, bobRequest, 1 ether);
+        uint256 bobBudget = bobAccount.getBudget();
+
+        escrow.fill(aliceRequest, 0, 50 * UNIT, 0, block.timestamp + 1 days);
+        escrow.fill(aliceRequest, 1, 50 * UNIT, 1, block.timestamp + 1 days);
+        PackedUserOperation memory lowGas = _operation(
+            aliceAccount, abi.encodeCall(InvestmentExecutionAccount.executeIntegrate, (2)), 0, 0, EXECUTOR_KEY
+        );
+        lowGas.accountGasLimits = bytes32((uint256(250_000) << 128) | 100_000);
+        _resign(lowGas, EXECUTOR_KEY);
+        _handle(lowGas);
+
+        assertTrue(aliceAccount.paused());
+        assertEq(aliceAccount.attempts(), 1);
+        assertLt(aliceAccount.getBudget(), 1 ether);
+        assertEq(bobAccount.getBudget(), bobBudget);
+    }
+
+    function testMaxAttemptsSurvivesDonationWithdrawalTopUpAndResume() public {
+        uint256 requestId = _request(ALICE);
+        InvestmentExecutionAccount account = _account(ALICE, requestId, 1 ether);
+        entryPoint.depositTo{value: 1 ether}(address(account));
+        assertEq(account.totalFunded(), 1 ether);
+
+        for (uint256 i; i < 3; ++i) {
+            PackedUserOperation memory stale = _operation(
+                account,
+                abi.encodeCall(InvestmentExecutionAccount.executeFill, (0, 50 * UNIT, 99, block.timestamp + 1 days)),
+                account.policyEpoch(),
+                uint64(i),
+                EXECUTOR_KEY
+            );
+            _handle(stale);
+            assertTrue(account.paused());
+            if (i < 2) {
+                vm.prank(ALICE);
+                account.resume();
+            }
+        }
+        assertEq(account.attempts(), 3);
+        vm.prank(ALICE);
+        account.topUp{value: 1 ether}();
+        vm.prank(ALICE);
+        account.withdrawBudget(0.1 ether);
+        vm.prank(ALICE);
+        vm.expectRevert(InvestmentExecutionAccount.AttemptLimitReached.selector);
+        account.resume();
+    }
+
+    function testDustActionsAndUnavailableMarketsCannotRearmOrBlockRecovery() public {
+        uint256 requestId = _request(ALICE);
+        InvestmentExecutionAccount account = _account(ALICE, requestId, 1 ether);
+        PackedUserOperation memory dust = _operation(
+            account,
+            abi.encodeCall(InvestmentExecutionAccount.executeFill, (0, 1, 0, block.timestamp + 1 days)),
+            0,
+            0,
+            EXECUTOR_KEY
+        );
+        _handle(dust);
+        assertTrue(account.paused());
+        assertEq(account.attempts(), 1);
+
+        oracleA.setFails(true);
+        oracleB.setFails(true);
+        vm.prank(ALICE);
+        escrow.stop(requestId);
+        uint256 ownerBalance = ALICE.balance;
+        vm.prank(ALICE);
+        account.withdrawBudget(0.1 ether);
+        assertEq(ALICE.balance, ownerBalance + 0.1 ether);
+        assertTrue(account.paused());
+    }
+
     function _request(address investor) private returns (uint256) {
         bytes32 version = EquiVault(address(escrow.vault())).investmentVersion();
         vm.prank(investor);
@@ -177,16 +307,19 @@ contract InvestmentExecutionAccountTest is Test {
         private
         returns (InvestmentExecutionAccount account)
     {
-        InvestmentExecutionAccount.Policy memory policy = InvestmentExecutionAccount.Policy({
+        vm.prank(investor);
+        account = accountFactory.createAccount{value: funding}(address(escrow), requestId, executor, _policy());
+        assertEq(accountFactory.accounts(address(escrow), requestId), address(account));
+    }
+
+    function _policy() private view returns (InvestmentExecutionAccount.Policy memory policy) {
+        policy = InvestmentExecutionAccount.Policy({
             maxFeePerGas: uint128(1 gwei),
             maxAttemptFee: uint128(0.01 ether),
             maxAttempts: 3,
             validUntil: uint48(block.timestamp + 1 days),
             minFillAmount: 10 * UNIT
         });
-        vm.prank(investor);
-        account = accountFactory.createAccount{value: funding}(address(escrow), requestId, executor, policy);
-        assertEq(accountFactory.accounts(address(escrow), requestId), address(account));
     }
 
     function _operation(
@@ -212,5 +345,21 @@ contract InvestmentExecutionAccountTest is Test {
         operations[0] = operation;
         vm.prank(BUNDLER, BUNDLER);
         entryPoint.handleOps(operations, payable(BENEFICIARY));
+    }
+
+    function _resign(PackedUserOperation memory operation, uint256 signingKey) private {
+        operation.signature = "";
+        bytes32 digest = entryPoint.getUserOpHash(operation).toEthSignedMessageHash();
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signingKey, digest);
+        operation.signature = abi.encodePacked(r, s, v);
+    }
+
+    function _rejectWithoutDebit(InvestmentExecutionAccount account, PackedUserOperation memory operation) private {
+        uint256 budget = account.getBudget();
+        vm.expectRevert();
+        _handle(operation);
+        assertEq(account.getBudget(), budget);
+        assertEq(account.attempts(), 0);
+        assertFalse(account.paused());
     }
 }
