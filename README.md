@@ -90,7 +90,10 @@ all three trust modes and two pending parameter proposals. Its synthetic token d
 (BTC: 8, SOL: 9, other basket tokens: 18); settlement is the local 6-decimal `USDG` token
 (on-chain name `Demo USDG`). This is a local test token, not the official token deployment.
 The default minimal fixture continues to use `MOCK`.
-The generated, ignored `deployments/31337/demo.json` binds actual token/vault addresses and
+The generated, ignored `.local-demo/addresses.json` records the isolated RPC and deployment
+without replacing `deployments/31337/addresses.json`. Select it explicitly in the app/API with
+`EQUIVAULTS_LOCAL_ADDRESSES_FILE`, and in the sponsor with `--addresses`.
+The `.local-demo/demo.json` manifest binds actual token/vault addresses and
 manager profiles to the chain genesis and deployment block. The app's `demo:metadata` command
 consumes this manifest to publish names through its signed metadata API.
 

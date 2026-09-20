@@ -6,6 +6,8 @@ import {Script, console2} from "forge-std/Script.sol";
 import {AssetRegistry} from "../src/AssetRegistry.sol";
 import {EquiVault} from "../src/EquiVault.sol";
 import {RebalanceEngine} from "../src/RebalanceEngine.sol";
+import {EntryPoint} from "../lib/account-abstraction/contracts/core/EntryPoint.sol";
+import {InvestmentExecutionFactory} from "../src/InvestmentExecutionFactory.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
 import {LegacyEquiVault} from "../test/fixtures/synchronous-v1/LegacyEquiVault.sol";
 import {LegacyVaultFactory} from "../test/fixtures/synchronous-v1/LegacyVaultFactory.sol";
@@ -100,6 +102,8 @@ contract DeployLocal is Script {
 
         // --- v2 factory + hybrid example vault, v1 synchronous compatibility vault, and engine ---
         factory = new VaultFactory(settlement, registry);
+        EntryPoint entryPoint = new EntryPoint();
+        new InvestmentExecutionFactory(entryPoint, factory);
         exampleVault = factory.createVault(
             ANVIL1,
             _assetsAB(),

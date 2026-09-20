@@ -22,8 +22,8 @@ import urllib.request
 from pathlib import Path
 
 EXPECTED_ABIS = (
-    "AssetRegistry.json", "EquiVault.json", "IERC20.json", "IPriceOracle.json",
-    "ISwapRouter.json", "InvestmentEscrow.json", "RebalanceEngine.json", "VaultFactory.json",
+    "AssetRegistry.json", "EntryPoint.json", "EquiVault.json", "IERC20.json", "IPriceOracle.json",
+    "ISwapRouter.json", "InvestmentEscrow.json", "InvestmentExecutionAccount.json", "InvestmentExecutionFactory.json", "RebalanceEngine.json", "VaultFactory.json",
 )
 CORE_ADDRESS_FIELDS = ("registry", "factory", "legacyFactory", "engine", "exampleVault", "legacyExampleVault")
 LOCAL_ADDRESS_FIELDS = (
@@ -64,7 +64,7 @@ require(isinstance(manifest.get("contractsCommit"), str) and COMMIT_RE.fullmatch
 require(isinstance(manifest.get("generatedAt"), str), "generatedAt must be an ISO date")
 datetime.date.fromisoformat(manifest["generatedAt"])
 require(manifest.get("protocolVersion") == 2, "manifest protocolVersion must be 2")
-require(manifest.get("capabilities", {}).get("progressiveInvestment") == {"enabled": True, "status": "local", "personalPriceLimits": {"enabled": True, "version": 1}}, "progressive investment and price-limit local capabilities")
+require(manifest.get("capabilities", {}).get("progressiveInvestment") == {"enabled": True, "status": "local", "personalPriceLimits": {"enabled": True, "version": 1}, "investorFundedExecution": {"enabled": True, "version": 1, "entryPointVersion": "0.9"}}, "progressive investment and price-limit local capabilities")
 require(manifest.get("abiDir") == "abi", "ABI directory must be the published abi/ directory")
 require(manifest.get("abiFiles") == list(EXPECTED_ABIS), "manifest ABI list is incomplete or unexpected")
 

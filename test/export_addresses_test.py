@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Unit coverage for receipt-derived local address export guards."""
 import importlib.util
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -123,6 +126,81 @@ class ArtifactPreparationTest(unittest.TestCase):
         ):
             self.assertEqual(export_addresses.prepare_artifact_verification(), "a" * 40)
         self.assertEqual(calls, ["source", "rebuild"])
+
+
+class ArtifactSourceGuardPathspecTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        (self.root / "src").mkdir()
+        (self.root / "script").mkdir()
+        (self.root / "test/fixtures/synchronous-v1").mkdir(parents=True)
+        (self.root / "test/mocks").mkdir(parents=True)
+        (self.root / "lib").mkdir()
+        (self.root / "src/EquiVault.sol").write_text("contract EquiVault {}\n")
+        (self.root / "script/DeployLocal.s.sol").write_text("contract DeployLocal {}\n")
+        (self.root / "script/LocalDemoTokens.sol").write_text("library LocalDemoTokens {}\n")
+        (self.root / "script/SeedLocalDemo.s.sol").write_text("contract SeedLocalDemo {}\n")
+        (self.root / "foundry.toml").write_text("[profile.default]\n")
+        self._git("init", "-q")
+        self._git("add", ".")
+        self._git("-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "source")
+        self.commit = self._git("rev-parse", "HEAD").strip()
+        manifest = self.root / "deployments/manifest.json"
+        manifest.parent.mkdir()
+        manifest.write_text(json.dumps({"contractsCommit": self.commit}))
+        self.root_patch = patch.object(export_addresses, "ROOT", self.root)
+        self.manifest_patch = patch.object(export_addresses, "MANIFEST_FILE", manifest)
+        self.root_patch.start()
+        self.manifest_patch.start()
+
+    def tearDown(self):
+        self.manifest_patch.stop()
+        self.root_patch.stop()
+        self.temporary.cleanup()
+
+    def _git(self, *args):
+        return subprocess.check_output(["git", *args], cwd=self.root, text=True)
+
+    def test_accepts_untracked_python_operator_script(self):
+        (self.root / "script/sponsor-daemon.py").write_text("print('operator')\n")
+        self.assertEqual(export_addresses.artifact_source_commit(), self.commit)
+
+    def test_rejects_a_changed_solidity_deployment_input(self):
+        (self.root / "script/LocalDemoTokens.sol").write_text("library LocalDemoTokens { function changed() external {} }\n")
+        with self.assertRaisesRegex(SystemExit, "contract sources differ"):
+            export_addresses.artifact_source_commit()
+
+    def test_rejects_a_new_solidity_deployment_input(self):
+        (self.root / "script/NewDeployInput.sol").write_text("contract NewDeployInput {}\n")
+        with self.assertRaisesRegex(SystemExit, "untracked contract source paths"):
+            export_addresses.artifact_source_commit()
+
+
+class OutputPathTest(unittest.TestCase):
+    def test_accepts_the_official_and_local_catalog_paths(self):
+        self.assertEqual(export_addresses.output_file("deployments/31337/addresses.json"), export_addresses.OUT_FILE)
+        self.assertEqual(
+            export_addresses.output_file(".local-demo/addresses.json"),
+            export_addresses.ROOT / ".local-demo/addresses.json",
+        )
+
+    def test_rejects_an_output_outside_the_checkout(self):
+        with self.assertRaisesRegex(SystemExit, "inside the contracts checkout"):
+            export_addresses.output_file("/tmp/addresses.json")
+
+    def test_keeps_the_official_rpc_but_records_an_isolated_catalog_rpc(self):
+        self.assertEqual(
+            export_addresses.catalog_rpc_url(export_addresses.OUT_FILE.resolve(), "http://127.0.0.1:38545"),
+            export_addresses.PUBLISHED_LOCAL_RPC_URL,
+        )
+        self.assertEqual(
+            export_addresses.catalog_rpc_url(
+                export_addresses.output_file(".local-demo/addresses.json"),
+                "http://127.0.0.1:38545",
+            ),
+            "http://127.0.0.1:38545",
+        )
 
 
 if __name__ == "__main__":

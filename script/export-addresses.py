@@ -43,8 +43,22 @@ SINGLE = {
     "VaultFactory": "factory",
     "LegacyVaultFactory": "legacyFactory",
     "RebalanceEngine": "engine",
+    "EntryPoint": "entryPoint",
+    "InvestmentExecutionFactory": "executionFactory",
 }
 VAULT_EVENT_TOPIC = "0x32c459f0706c3a07f3800e0e0366fbb8ecffedf431250fdf6a59e9fd5c7f20c4"
+
+# Python and shell helpers do not affect Foundry compilation. Solidity scripts do: their
+# imports are deployment inputs, so include both tracked and newly introduced files here.
+PROVENANCE_PATHS = (
+    "src",
+    ":(glob)script/*.sol",
+    ":(glob)script/**/*.sol",
+    "test/fixtures/synchronous-v1",
+    "test/mocks/Mocks.sol",
+    "foundry.toml",
+    "lib",
+)
 
 
 def fail(message: str) -> None:
@@ -227,10 +241,7 @@ def artifact_source_commit() -> str:
             text=True,
         )
         subprocess.run(
-            [
-                "git", "diff", "--quiet", source_commit, "--", "src", "script",
-                "test/fixtures/synchronous-v1", "test/mocks/Mocks.sol", "foundry.toml", "lib",
-            ],
+            ["git", "diff", "--quiet", source_commit, "--", *PROVENANCE_PATHS],
             cwd=ROOT,
             check=True,
         )
@@ -242,7 +253,7 @@ def artifact_source_commit() -> str:
     untracked = subprocess.check_output(
         [
             "git", "ls-files", "--others", "--exclude-standard", "--",
-            "src", "script", "test/fixtures/synchronous-v1", "test/mocks/Mocks.sol", "foundry.toml", "lib",
+            *PROVENANCE_PATHS,
         ],
         cwd=ROOT,
         text=True,
@@ -269,12 +280,38 @@ def prepare_artifact_verification() -> str:
     return source_commit
 
 
+def output_file(value: str) -> Path:
+    """Resolve an export location while keeping generated local state in this checkout."""
+    output = Path(value)
+    if not output.is_absolute():
+        output = ROOT / output
+    output = output.resolve()
+    try:
+        output.relative_to(ROOT.resolve())
+    except ValueError:
+        fail("--output must be inside the contracts checkout")
+    return output
+
+
+def catalog_rpc_url(output: Path, rpc_url: str) -> str:
+    """Keep the published fixture stable while recording an isolated catalog's real RPC."""
+    if output == OUT_FILE.resolve():
+        return PUBLISHED_LOCAL_RPC_URL
+    return rpc_url
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rpc-url", required=True, help="Explicit loopback Anvil RPC URL (chainId 31337)")
+    parser.add_argument(
+        "--output",
+        default=str(OUT_FILE.relative_to(ROOT)),
+        help="Address catalog output path, relative to this checkout (default: deployments/31337/addresses.json)",
+    )
     args = parser.parse_args()
     require_local_anvil(args.rpc_url)
     v2_commit = prepare_artifact_verification()
+    out_file = output_file(args.output)
 
     if not RUN_FILE.exists():
         fail(f"missing broadcast receipts: {RUN_FILE}")
@@ -382,7 +419,7 @@ def main() -> None:
     addresses = {key: addresses[key] for key in required}
     out = {
         "chainId": 31337,
-        "rpcUrl": PUBLISHED_LOCAL_RPC_URL,
+        "rpcUrl": catalog_rpc_url(out_file, args.rpc_url),
         "network": "anvil-local",
         "note": "Local dev environment. Regenerate with an explicit loopback Anvil RPC URL, "
                 "then run python3 script/export-addresses.py --rpc-url <rpc-url>.",
@@ -397,9 +434,17 @@ def main() -> None:
             {"address": addresses["legacyFactory"], "protocolVersion": 1, "codeHash": v1_hash, "contractsCommit": V1_COMMIT},
         ],
     }
-    OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    OUT_FILE.write_text(json.dumps(out, indent=2) + "\n")
-    print(f"wrote {OUT_FILE}")
+    for key, contract in (("entryPoint", "EntryPoint"), ("executionFactory", "InvestmentExecutionFactory")):
+        verify_compiled_runtime(args.rpc_url, contract, addresses[key])
+    out["execution"] = {
+        "version": 1, "entryPoint": addresses["entryPoint"], "factory": addresses["executionFactory"],
+        "executor": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
+        "entryPointCodeHash": runtime_code_hash(args.rpc_url, addresses["entryPoint"]),
+        "factoryCodeHash": runtime_code_hash(args.rpc_url, addresses["executionFactory"]),
+    }
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(out, indent=2) + "\n")
+    print(f"wrote {out_file}")
     print(f"  v2 factory={out['factory']} hash={v2_hash}")
     print(f"  v1 factory={out['legacyFactory']} hash={v1_hash}")
 

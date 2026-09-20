@@ -15,8 +15,9 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-ADDRESSES = ROOT / "deployments/31337/addresses.json"
-MANIFEST = ROOT / "deployments/31337/demo.json"
+DEMO_DIRECTORY = ROOT / ".local-demo"
+ADDRESSES = DEMO_DIRECTORY / "addresses.json"
+MANIFEST = DEMO_DIRECTORY / "demo.json"
 ADMIN = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 ASSET_EVENT = "AssetRegistered(address,address,address,address,uint48,uint8)"
 VAULT_EVENT = "VaultCreated(address,address,address,uint256,uint8,uint256,uint16,uint16,uint16,uint16)"
@@ -99,7 +100,7 @@ class Demo:
                 self.load()
                 print("Existing demo verified; no duplicate vaults or deposits created.")
                 return
-        progress_file = ROOT / ".local-demo/progress.json"
+        progress_file = DEMO_DIRECTORY / "progress.json"
         if progress_file.exists():
             progress = json.loads(progress_file.read_text())
             for key, value in self.identity(progress["factory"]).items():
@@ -120,12 +121,23 @@ class Demo:
                 "Seeding requires a fresh dedicated chain. Partial/foreign state is preserved; inspect broadcast logs before recovery.")
         env = {**os.environ, "LOCAL_DEMO": "true"}
         self.broadcast("DeployLocal", env)
-        print(run(sys.executable, "script/export-addresses.py"), flush=True)
+        print(self.export_deployment_addresses(), flush=True)
         addresses = json.loads(ADDRESSES.read_text())
         progress = {**self.identity(addresses["factory"]), "stage": "baseline",
                     "adminNonce": self.rpc("eth_getTransactionCount", [ADMIN, "latest"])}
         progress_file.write_text(json.dumps(progress) + "\n")
         self.seed_extension(addresses, progress_file)
+
+    def export_deployment_addresses(self):
+        return run(
+            sys.executable,
+            "script/export-addresses.py",
+            "--rpc-url",
+            self.url,
+            "--output",
+            str(ADDRESSES.relative_to(ROOT)),
+            timeout=600,
+        )
 
     def seed_extension(self, addresses, progress_file):
         env = {**os.environ, "LOCAL_DEMO": "true"}
@@ -141,7 +153,7 @@ class Demo:
     def broadcast(self, name, env):
         print(f"Broadcasting {name} on {self.url} (sequential receipts)...", flush=True)
         # Forge keeps the resumable broadcast receipts on disk. No automatic retry/reset.
-        log = ROOT / ".local-demo" / f"{name}.log"
+        log = DEMO_DIRECTORY / f"{name}.log"
         with log.open("w") as handle:
             result = subprocess.run(["forge", "script", f"script/{name}.s.sol", "--rpc-url", self.url,
                 "--broadcast", "--unlocked", "--sender", ADMIN, "--slow"], cwd=ROOT, env=env,
@@ -231,7 +243,7 @@ def main():
     parser.add_argument("--rpc-url", default="http://127.0.0.1:8546")
     args = parser.parse_args()
     demo = Demo(args.rpc_url)
-    directory = ROOT / ".local-demo"
+    directory = DEMO_DIRECTORY
     directory.mkdir(exist_ok=True)
     with (directory / "operation.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
