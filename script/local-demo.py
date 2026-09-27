@@ -150,28 +150,38 @@ class Demo:
         self.export(addresses)
         self.verify(self.load())
 
-    def broadcast(self, name, env):
+    def broadcast(self, name, env, log_path=None):
         print(f"Broadcasting {name} on {self.url} (sequential receipts)...", flush=True)
         # Forge keeps the resumable broadcast receipts on disk. No automatic retry/reset.
-        log = DEMO_DIRECTORY / f"{name}.log"
+        log = Path(log_path) if log_path else DEMO_DIRECTORY / f"{name}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("w") as handle:
             result = subprocess.run(["forge", "script", f"script/{name}.s.sol", "--rpc-url", self.url,
                 "--broadcast", "--unlocked", "--sender", ADMIN, "--slow"], cwd=ROOT, env=env,
                 stdout=handle, stderr=subprocess.STDOUT, timeout=600)
         require(result.returncode == 0, f"{name} failed. Chain preserved; inspect {log}.")
 
+    def export_asset(self, registry, address):
+        config = self.call(registry, "assetConfig(address)((address,address,address,uint48,uint8,uint8))", address)
+        decimals = int(self.call(address, "decimals()(uint8)"))
+        require(decimals == int(config[4]), "Token and registry decimals disagree.")
+        return {"address": address, "symbol": self.call(address, "symbol()(string)"),
+                "decimals": decimals, "primaryOracle": config[0], "fallbackOracle": config[1],
+                "pool": config[2], "maxPriceAge": int(config[3])}
+
     def export(self, addresses):
         factory, registry = addresses["factory"], addresses["registry"]
         catalog = json.loads((ROOT / "script/demo-vaults.json").read_text())
         assets = []
-        for log in self.logs(registry, ASSET_EVENT):
+        asset_logs = self.logs(registry, ASSET_EVENT)
+        require(len(asset_logs) >= len(catalog["assets"]), "Demo asset catalog is incomplete.")
+        # A later opt-in simulation extension registers its own assets in a separate manifest.
+        # Keep this stable catalog bound to the original deployment order.
+        for log in asset_logs[:len(catalog["assets"])]:
             address = "0x" + log["topics"][1][-40:]
-            config = self.call(registry, "assetConfig(address)((address,address,address,uint48,uint8,uint8))", address)
-            assets.append({"address": address, "symbol": self.call(address, "symbol()(string)"),
-                           "decimals": int(config[5]), "primaryOracle": config[0], "fallbackOracle": config[1],
-                           "pool": config[2], "maxPriceAge": int(config[3])})
+            assets.append(self.export_asset(registry, address))
         count = int(self.call(factory, "vaultCount()(uint256)"))
-        require(count == len(catalog["vaults"]), "Vault catalog/count mismatch; no manifest published.")
+        require(count >= len(catalog["vaults"]), "Vault catalog/count mismatch; no manifest published.")
         vaults = []
         for index, spec in enumerate(catalog["vaults"]):
             address = self.call(factory, "vaults(uint256)(address)", index)
@@ -192,8 +202,11 @@ class Demo:
     def verify(self, manifest):
         assets = manifest["assets"]
         require(len(assets) == 8 and len({a["address"].lower() for a in assets}) == 8, "Expected eight distinct assets.")
-        require(int(self.call(manifest["factory"], "vaultCount()(uint256)")) == len(manifest["vaults"]),
-                "Vault count changed; manual additions are preserved, but fixture verification needs a new export.")
+        count = int(self.call(manifest["factory"], "vaultCount()(uint256)"))
+        require(count >= len(manifest["vaults"]), "Vault catalog is incomplete.")
+        for index, vault in enumerate(manifest["vaults"]):
+            require(self.call(manifest["factory"], "vaults(uint256)(address)", index).lower() == vault["address"].lower(),
+                    "Catalog vault binding changed.")
         sizes, funded, managers = set(), 0, set()
         for vault in manifest["vaults"]:
             address = vault["address"]

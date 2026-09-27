@@ -14,6 +14,19 @@ SPEC.loader.exec_module(local_demo)
 
 
 class LocalDemoCatalogRoutingTest(unittest.TestCase):
+    def test_asset_export_reads_decimals_not_registry_status(self):
+        demo = local_demo.Demo("http://127.0.0.1:38545")
+        for decimals in (6, 8, 9, 18):
+            with self.subTest(decimals=decimals), patch.object(demo, "call", side_effect=[['primary', 'fallback', 'pool', 3600, decimals, 1], decimals, 'BTC']):
+                exported = demo.export_asset('registry', 'token')
+                self.assertEqual(exported['decimals'], decimals)
+
+    def test_asset_export_refuses_inconsistent_decimals(self):
+        demo = local_demo.Demo("http://127.0.0.1:38545")
+        with patch.object(demo, "call", side_effect=[['primary', 'fallback', 'pool', 3600, 8, 1], 18]):
+            with self.assertRaisesRegex(RuntimeError, 'decimals disagree'):
+                demo.export_asset('registry', 'token')
+
     def test_export_uses_the_dedicated_rpc_and_ignored_catalog(self):
         demo = local_demo.Demo("http://127.0.0.1:38545")
         with patch.object(local_demo, "run", return_value="exported") as run:

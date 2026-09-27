@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -135,5 +136,189 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(report['funding'], 'investor')
             self.assertEqual(report['operator']['budgetWei'], '0')
 
+
+class PlannerTests(unittest.TestCase):
+    def planner(self, max_fill=1_000_000, impact=50):
+        instance=object.__new__(executor.Executor)
+        instance.a=types.SimpleNamespace(max_fill=max_fill, max_price_impact_bps=impact)
+        return instance
+
+    def test_deep_pool_50000_request_needs_only_two_fills_and_integration(self):
+        instance=self.planner(max_fill=1_000_000)
+        instance.pool_quote=lambda registry, settlement, token, amount, tag: {'amount':amount,'out':amount * 2,'impactBps':0,'route':'pool'}
+        first, reason=instance.adaptive_cap('registry', 'settlement', 'a', 30_000_000_000, 30_000_000_000, 1, '0x1')
+        second, second_reason=instance.adaptive_cap('registry', 'settlement', 'b', 20_000_000_000, 20_000_000_000, 1, '0x1')
+        self.assertIsNone(reason); self.assertIsNone(second_reason)
+        self.assertEqual((first['amount'], second['amount']), (30_000_000_000, 20_000_000_000))
+        self.assertLessEqual(2 + 1, 32)
+
+    def test_thin_pool_downsizes_to_largest_impact_bounded_amount(self):
+        instance=self.planner(impact=50)
+        instance.pool_quote=lambda registry, settlement, token, amount, tag: {'amount':amount,'out':amount,'impactBps':amount // 100,'route':'pool'}
+        quote, reason=instance.adaptive_cap('registry', 'settlement', 'asset', 10_000, 10_000, 1, '0x1')
+        self.assertIsNone(reason); self.assertEqual(quote['amount'], 5_099)
+        self.assertEqual(quote['impactBps'], 50)
+
+    def test_low_decimal_pool_quote_uses_exact_conservative_ratio(self):
+        instance=self.planner(); route='0x'+'12'*20
+        config='0x'+('0'*64)*2+route[2:].rjust(64, '0')+('0'*64)*3
+        instance.call=lambda target, signature, tag, *values: config
+        values={('reserveOf(address)', 'settlement'):3, ('reserveOf(address)', 'asset'):7, ('swapFeeBps()', None):0}
+        instance.uint=lambda target, signature, tag, *args: values[(signature, args[0] if args else None)]
+        quote=instance.pool_quote('registry', 'settlement', 'asset', 1, '0x1')
+        # Exact marginal output is 7/3 while the executable integer output is 2.
+        # Flooring the marginal first would report zero; ceil ratio reports 1,429 bps.
+        self.assertEqual(quote['out'], 2)
+        self.assertEqual(quote['impactBps'], 1429)
+
+    def test_unsupported_liquidity_fails_closed_without_a_preflight(self):
+        instance=self.planner(max_fill=600); instance.factory='factory'; instance.addr=lambda target, signature, tag: signature
+        instance.adaptive_cap=lambda *args: (None, 'price_impact_unavailable')
+        instance.preflight_fill=lambda *args: self.fail('unsupported route must not reach a fill preflight')
+        item={'escrow':'escrow','requestId':'1','sequence':'0','available':500}
+        wrapped, data=instance.best_fill(item, 'vault', ['asset'], [{'quantity':0,'cost':0}], [700], '0x1', {'timestamp':'0x1'}, {'minFill':1,'executor':'operator'})
+        self.assertIsNone(wrapped); self.assertIsNone(data)
+        self.assertEqual(item['planning']['reason'], 'price_impact_unavailable')
+
+    def test_largest_blocked_leg_does_not_starve_a_smaller_viable_leg(self):
+        instance=self.planner(); instance.factory='factory'; instance.addr=lambda target, signature, tag: signature
+        instance.adaptive_cap=lambda registry, settlement, token, cap, permitted, minimum, tag: ({'amount':cap,'out':cap * 2,'impactBps':1,'route':'pool'}, None)
+        instance.pool_quote=lambda registry, settlement, token, amount, tag: {'amount':amount,'out':amount * 2,'impactBps':1,'route':'pool'}
+        instance.investment_preview=lambda vault, quantities, tag: None
+        calls=[]
+        def preflight(escrow, rid, index, amount, sequence, deadline, operator, tag):
+            calls.append((index, amount))
+            if index == 0: raise executor.sponsor.RpcExecutionError('blocked')
+            return '0xfill', amount * 2
+        instance.preflight_fill=preflight
+        item={'escrow':'escrow','requestId':'1','sequence':'0','available':100}
+        wrapped, _=instance.best_fill(item, 'vault', ['large','small'], [{'quantity':0,'cost':0},{'quantity':0,'cost':0}], [100, 90], '0x1', {'timestamp':'0x1'}, {'minFill':10,'executor':'operator'})
+        self.assertTrue(wrapped.startswith('0xfc75c449'))
+        self.assertEqual(item['planning']['index'], 1)
+        self.assertTrue(any(index == 0 for index, _ in calls))
+
+    def test_rejected_cap_searches_useful_interval_above_half(self):
+        instance=self.planner(); instance.factory='factory'; instance.addr=lambda *args: 'registry'
+        instance.pool_quote=lambda registry, settlement, token, amount, tag: {'amount':amount,'out':amount * 2,'impactBps':1,'route':'pool'}
+        instance.investment_preview=lambda *args: None
+        calls=[]
+        def preflight(escrow, rid, index, amount, sequence, deadline, operator, tag):
+            calls.append(amount)
+            if amount > 90: raise executor.sponsor.RpcExecutionError('price_limit')
+            return '0xfill', amount * 2
+        instance.preflight_fill=preflight
+        item={'escrow':'escrow','requestId':'1','sequence':'0','available':100}
+        wrapped, _=instance.best_fill(item, 'vault', ['asset'], [{'quantity':0,'cost':0}], [100], '0x1', {'timestamp':'0x1'}, {'minFill':80,'executor':'operator'})
+        self.assertIsNotNone(wrapped)
+        self.assertEqual(item['planning']['amount'], '90')
+        self.assertIn(80, calls)
+        self.assertTrue(all(amount >= 80 for amount in calls))
+        self.assertLessEqual(len(calls), executor.PLANNER_PROBES)
+
+    def test_last_attempt_is_reserved_for_integration(self):
+        instance=self.planner(); instance.request_assets=lambda *args: ['asset']
+        instance.position=lambda *args: {'quantity':0,'cost':0}
+        instance.investment_preview=lambda *args: None
+        item={'escrow':'escrow','vault':'vault','requestId':'1','sequence':'0','available':100}
+        result=instance.original_action(item, '0x1', {'timestamp':'0x1'}, {'attempts':31,'maxAttempts':32,'minFill':1,'executor':'operator'})
+        self.assertIsNone(result)
+        self.assertEqual(item['planning']['reason'], 'reserve_integration_attempt')
+
+    def test_integration_cost_matches_account_progress_guard(self):
+        partial, complete=executor.Executor.preview_cost([{'quantity':100,'cost':101}], {'amounts':[50]})
+        final, final_complete=executor.Executor.preview_cost([{'quantity':100,'cost':101}], {'amounts':[100]})
+        self.assertEqual((partial, complete), (50, False))
+        self.assertEqual((final, final_complete), (101, True))
+
+    def test_balanced_tranche_integrates_before_subminimum_cash_is_spent(self):
+        instance=self.planner(); instance.request_assets=lambda *args: ['asset']
+        instance.position=lambda *args: {'quantity':100,'cost':100}
+        instance.investment_preview=lambda *args: {'shares':99,'amounts':[100],'value':100}
+        instance.rpc=types.SimpleNamespace(call=lambda method, params: '0x1')
+        item={'escrow':'escrow','vault':'vault','requestId':'1','sequence':'0','available':49}
+        wrapped=instance.original_action(item, '0x1', {'timestamp':'0x1'}, {'attempts':0,'maxAttempts':32,'minFill':50,'executor':'operator'})
+        self.assertTrue(wrapped.startswith('0x3aaf8892'))
+        self.assertEqual(item['planning']['action'], 'integrate')
+
+    def test_subminimum_remainder_is_reported_without_a_fill(self):
+        instance=self.planner(); instance.request_assets=lambda *args: ['asset']
+        instance.position=lambda *args: {'quantity':0,'cost':0}; instance.investment_preview=lambda *args: None
+        item={'escrow':'escrow','vault':'vault','requestId':'1','sequence':'0','available':49}
+        self.assertIsNone(instance.original_action(item, '0x1', {'timestamp':'0x1'}, {'attempts':0,'maxAttempts':32,'minFill':50,'executor':'operator'}))
+        self.assertEqual(item['planning']['reason'], 'remaining_below_minimum')
+
+    def test_final_dust_and_hard_caps_keep_the_existing_bounds(self):
+        self.assertTrue(executor.Executor._useful_amount(7, 7, 10))
+        self.assertFalse(executor.Executor._useful_amount(7, 8, 10))
+        instance=self.planner(max_fill=600); instance.factory='factory'; instance.addr=lambda target, signature, tag: signature
+        observed=[]
+        def adaptive(registry, settlement, token, cap, permitted, minimum, tag):
+            observed.append((cap, permitted, minimum)); return {'amount':cap,'out':cap * 2,'impactBps':1,'route':'pool'}, None
+        instance.adaptive_cap=adaptive
+        instance.pool_quote=lambda registry, settlement, token, amount, tag: {'amount':amount,'out':amount * 2,'impactBps':1,'route':'pool'}
+        instance.investment_preview=lambda vault, quantities, tag: None
+        instance.preflight_fill=lambda escrow, rid, index, amount, sequence, deadline, operator, tag: ('0xfill', amount * 2)
+        item={'escrow':'escrow','requestId':'1','sequence':'0','available':500}
+        instance.best_fill(item, 'vault', ['asset'], [{'quantity':0,'cost':0}], [700], '0x1', {'timestamp':'0x1'}, {'minFill':1,'executor':'operator'})
+        self.assertEqual(observed, [(500, 700, 1)])
+
+    def test_all_price_plans_failing_never_submit_a_user_operation(self):
+        instance=self.planner(); account='0x'+'11'*20; escrow='escrow'; owner='0x'+'22'*20
+        instance.execution_factory='factory'; instance.entry_point='entry'; instance.sender='operator'
+        item={'vault':'vault','escrow':escrow,'requestId':'1','owner':owner,'closed':0,'available':100}
+        instance.request_item=lambda *args: dict(item)
+        instance.addr=lambda target, signature, tag, *values: account if target == 'factory' else None
+        info={'account':account,'executor':'operator','owner':owner,'escrow':escrow,'requestId':1,'entryPoint':'entry','paused':False,
+              'attempts':0,'maxAttempts':32,'validUntil':999,'budget':10**20,'maxAttempt':10**20,'maxFee':1,'epoch':0,'minFill':1}
+        instance.account_info=lambda *args: dict(info)
+        def no_action(row, *args): row['planning']={'action':'none','reason':'price_impact_unavailable'}; return None
+        instance.original_action=no_action; instance.submit=lambda *args: self.fail('all rejected plans must not submit')
+        reports=[]; instance.report=lambda row, state, reason: reports.append((state, reason))
+        self.assertFalse(instance.try_request('vault', escrow, 1, 'latest', {'timestamp':'0x1','hash':'0xhash'}))
+        self.assertEqual(reports, [('no_admissible_action', 'price_impact_unavailable')])
+
+
+class RotationTests(unittest.TestCase):
+    def make_executor(self, directory, count, populated):
+        instance=object.__new__(executor.Executor)
+        instance.factory='factory';instance.cursor_vault=0;instance.cursor_request={}
+        instance.db=executor.ExecutionStore(Path(directory)/'rotation.sqlite')
+        instance.reconcile=lambda:None
+        instance.status=type('Status',(),{'base':{}})()
+        class Rpc:
+            def call(self, method, params): return {'number':'0x1','hash':'0xhash','timestamp':'0x1'}
+        instance.rpc=Rpc()
+        def uint(target, signature, tag, *values):
+            if signature=='vaultCount()': return count
+            if signature=='isVault(address)': return 1
+            if signature=='protocolVersion()': return 2
+            if signature=='nextRequestId()': return 2 if int(target.split('-')[1]) in populated else 1
+            raise AssertionError(signature)
+        def addr(target, signature, tag, *values):
+            if signature=='vaults(uint256)': return 'vault-'+str(values[0])
+            if signature=='investmentEscrow()': return target.replace('vault','escrow')
+            if signature=='vault()': return target.replace('escrow','vault')
+            return signature
+        instance.uint=uint;instance.addr=addr
+        instance.seen=[]
+        instance.try_request=lambda vault,*args: instance.seen.append(vault) or False
+        return instance
+
+    def test_empty_first_sixteen_vaults_cannot_starve_later_requests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            instance=self.make_executor(folder,22,{17,18,20})
+            try:
+                instance.cycle();self.assertEqual(instance.cursor_vault,16)
+                self.assertEqual(instance.seen,[])
+                instance.cycle();self.assertEqual(instance.seen,['vault-17','vault-18','vault-20'])
+                self.assertEqual(int(instance.db.value('cursor_vault')),10)
+            finally: instance.db.close()
+
+    def test_blocked_requests_do_not_change_scan_origin_mid_cycle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            instance=self.make_executor(folder,4,{0,1,2,3})
+            try:
+                instance.cycle();self.assertEqual(instance.seen,['vault-0','vault-1','vault-2','vault-3'])
+            finally: instance.db.close()
 
 if __name__ == '__main__': unittest.main()
