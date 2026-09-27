@@ -19,6 +19,45 @@ CHAIN_ID = 31337
 STATUS_SCHEMA = 'equivaults-sponsor-status/v1'
 VAULT_CREATED = '0x32c459f0706c3a07f3800e0e0366fbb8ecffedf431250fdf6a59e9fd5c7f20c4'
 
+# These are the only ABI shapes used by the local schedulers on their hot path.
+# Keep dynamic shapes on cast below: its parser remains the compatibility path for
+# every signature or argument representation not covered by this exact encoder.
+STATIC_ABI = {
+    'protocolVersion()': ('0x2ae9c600', ()),
+    'vaultCount()': ('0xa7c6a100', ()),
+    'registry()': ('0x7b103999', ()),
+    'settlementAsset()': ('0xd3781d58', ()),
+    'vaults(uint256)': ('0x8c64ea4a', ('uint256',)),
+    'isVault(address)': ('0x652b9b41', ('address',)),
+    'investmentEscrow()': ('0xdcbc3bb6', ()),
+    'vault()': ('0xfbfa77cf', ()),
+    'settlement()': ('0x51160630', ()),
+    'nextRequestId()': ('0x6a84a985', ()),
+    'getRequest(uint256)': ('0xc58343ef', ('uint256',)),
+    'investmentVersion()': ('0xa1e04e29', ()),
+    'requestAssets(uint256)': ('0x73303e1f', ('uint256',)),
+    'positions(uint256,address)': ('0xe684d718', ('uint256', 'address')),
+    'maxFillAmount(uint256,uint256)': ('0xc0f0cc25', ('uint256', 'uint256')),
+    'integrate(uint256,uint256)': ('0x55c59be7', ('uint256', 'uint256')),
+    'fill(uint256,uint256,uint256,uint256,uint256)': ('0xc2807d6a', ('uint256',) * 5),
+    'entryPoint()': ('0xb0d691fe', ()),
+    'vaultFactory()': ('0xd8a06f73', ()),
+    'policy()': ('0x0505c8c9', ()),
+    'owner()': ('0x8da5cb5b', ()),
+    'executor()': ('0xc34c08e5', ()),
+    'escrow()': ('0xe2fdcc17', ()),
+    'requestId()': ('0x006d6cae', ()),
+    'attempts()': ('0x5754a042', ()),
+    'paused()': ('0x5c975abb', ()),
+    'policyEpoch()': ('0xa921d322', ()),
+    'getBudget()': ('0x127714c7', ()),
+    'accounts(address,uint256)': ('0x87524581', ('address', 'uint256')),
+    'getNonce(address,uint192)': ('0x35567e1a', ('address', 'uint192')),
+    'executeIntegrate(uint256)': ('0x3aaf8892', ('uint256',)),
+    'executeFill(uint256,uint256,uint256,uint256)': ('0xfc75c449', ('uint256',) * 4),
+}
+_CODE_HASHES = {}
+
 def integer(value):
     return int(value, 16)
 
@@ -28,11 +67,42 @@ def address(value):
 def now_ms():
     return int(time.time() * 1000)
 
+def _static_calldata(signature, args):
+    """Encode only canonical static values; return None for cast compatibility."""
+    layout = STATIC_ABI.get(signature)
+    if not layout or len(args) != len(layout[1]):
+        return None
+    selector, types = layout
+    words = []
+    for value, kind in zip(args, types):
+        if kind.startswith('uint'):
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < 2 ** int(kind[4:]):
+                return None
+            words.append(f'{value:064x}')
+        elif kind == 'address':
+            if not isinstance(value, str) or not re.fullmatch(r'0x[0-9a-fA-F]{40}', value):
+                return None
+            words.append(value[2:].lower().rjust(64, '0'))
+        else:
+            return None
+    return selector + ''.join(words)
+
 def calldata(signature, *args):
+    encoded = _static_calldata(signature, args)
+    if encoded is not None:
+        return encoded
     return subprocess.check_output(['cast', 'calldata', signature, *map(str, args)], text=True, timeout=10).strip()
 
 def hash_code(code):
-    return subprocess.check_output(['cast', 'keccak', code], text=True, timeout=10).strip().lower()
+    # Runtime code is read freshly by the caller.  Only the pure hash of identical
+    # returned bytes is cached, so no security-relevant chain read crosses blocks.
+    key = code.lower() if isinstance(code, str) and re.fullmatch(r'0x[0-9a-fA-F]*', code) else None
+    if key is not None and key in _CODE_HASHES:
+        return _CODE_HASHES[key]
+    digest = subprocess.check_output(['cast', 'keccak', code], text=True, timeout=10).strip().lower()
+    if key is not None:
+        _CODE_HASHES[key] = digest
+    return digest
 
 class Pause(RuntimeError):
     """A controlled public operator reason; never an arbitrary RPC error message."""

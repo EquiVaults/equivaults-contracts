@@ -1,10 +1,49 @@
-import importlib.util, json, tempfile, unittest
+import importlib.util, json, subprocess, tempfile, unittest
 from pathlib import Path
 from io import BytesIO
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('sponsor', Path(__file__).parents[1] / 'script/sponsor-daemon.py')
 sponsor = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sponsor)
+
+
+class CalldataEncodingTests(unittest.TestCase):
+    def test_static_hot_path_does_not_spawn_cast(self):
+        with patch.object(sponsor.subprocess, 'check_output', side_effect=AssertionError('cast must not run')):
+            self.assertEqual(
+                sponsor.calldata('integrate(uint256,uint256)', 1, 2),
+                '0x55c59be7' + f'{1:064x}{2:064x}',
+            )
+
+    def test_static_hot_path_encodings_match_cast(self):
+        address = '0x1234567890abcdef1234567890ABCDEF12345678'
+        for signature, (_, kinds) in sponsor.STATIC_ABI.items():
+            with self.subTest(signature=signature):
+                values = tuple(address if kind == 'address' else 2 ** int(kind[4:]) - 1 for kind in kinds)
+                expected = subprocess.check_output(['cast', 'calldata', signature, *map(str, values)], text=True, timeout=10).strip()
+                self.assertEqual(sponsor.calldata(signature, *values), expected)
+
+    def test_noncanonical_static_values_and_dynamic_abi_fall_back_to_cast(self):
+        cases = (
+            ('integrate(uint256,uint256)', ('1', 2)),
+            ('integrate(uint256,uint256)', (2 ** 256, 2)),
+            ('positions(uint256,address)', (1, 'not-an-address')),
+            ('previewInvestment(uint256[])', ('[1,2]',)),
+        )
+        for signature, values in cases:
+            with self.subTest(signature=signature, values=values), patch.object(sponsor.subprocess, 'check_output', return_value='0xfallback\n') as encoded:
+                self.assertEqual(sponsor.calldata(signature, *values), '0xfallback')
+                self.assertEqual(encoded.call_args.args[0], ['cast', 'calldata', signature, *map(str, values)])
+
+    def test_runtime_hash_cache_is_keyed_by_returned_code_content(self):
+        sponsor._CODE_HASHES.clear()
+        with patch.object(sponsor.subprocess, 'check_output', return_value='0xhash\n') as hashed:
+            self.assertEqual(sponsor.hash_code('0xAbCd'), '0xhash')
+            self.assertEqual(sponsor.hash_code('0xabcd'), '0xhash')
+            self.assertEqual(hashed.call_count, 1)
+            self.assertEqual(sponsor.hash_code('0xdead'), '0xhash')
+            self.assertEqual(hashed.call_count, 2)
+        sponsor._CODE_HASHES.clear()
 
 class StoreTests(unittest.TestCase):
 

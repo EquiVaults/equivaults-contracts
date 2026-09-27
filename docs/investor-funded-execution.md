@@ -85,6 +85,30 @@ The old `sponsor-daemon.py` remains a historical, explicitly invoked local test
 harness. It is not the default runtime for investor-funded automation and must not
 be run as a fallback for a missing personal budget.
 
+## Local adaptive purchase sizing
+
+The local planner reads the configured MockPool reserves and swap fee at one
+pinned block, then checks its predicted token output against the actual escrow
+`eth_call`. Unsupported or mismatched quote models wait without signing. The
+operator target defaults to 50 basis points of per-trade price impact; personal
+purchase ceilings, vault rules, and the execution account policy still apply.
+`--max-fill` is an emergency upper bound in settlement base units, not a fixed
+purchase size. For six-decimal USDG, `1000000000000` is one million USDG.
+
+The planner sizes proportional basket tranches, searches for useful admissible
+fills with a bounded number of free probes, and integrates only when the account's
+progress guard can pass. It reserves an attempt for integration. A remainder too
+small for useful progress reports `remaining_below_minimum`; the owner can stop,
+claim any personal tokens, and recover unused execution fees. No attempt policy is
+extended automatically.
+
+Splitting successive trades against unchanged liquidity does not guarantee more
+tokens overall. This model covers the local constant-product pools only; it is not
+a multi-DEX router or a proof of globally optimal execution. The simulation
+controller accepts `maxPriceImpactBps`, `maxFill`, and `interval` in its executor
+configuration. The interval is a minimum delay between scheduler passes, not a
+completion deadline.
+
 ## Start the local services
 
 Use the addresses and manifest for the same verified deployment. Choose unused loopback ports
@@ -100,7 +124,7 @@ python3 script/investor-executor.py --rpc-url http://127.0.0.1:19545 \
   --addresses deployments/31337/addresses.json --manifest deployments/manifest.json \
   --sender 0x976EA74026E726554dB657fA54763abd0C3a0aa9 \
   --state-db .local-demo/investor-executor.sqlite --status-port 19789 \
-  --bundler-url http://127.0.0.1:19790 --max-fill 50000000 --interval 5
+  --bundler-url http://127.0.0.1:19790 --max-fill 1000000000000 --max-price-impact-bps 50 --interval 1
 ```
 
 The app API reads status through `SPONSOR_STATUS_URL`; this legacy configuration name does

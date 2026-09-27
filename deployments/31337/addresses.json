@@ -29,13 +29,13 @@
     {
       "address": "0x09635f643e140090a9a8dcd712ed6285858cebef",
       "protocolVersion": 2,
-      "codeHash": "0x4fac2a202befe68c96c2c6f45171f79d23b2cf5a14879fe83721d94e37f6b57d",
+      "codeHash": "0x68e01fb271a7f2f15813a6f4ec5826e1656fc4a6a72ce3cce91124a4ca0bed2c",
       "contractsCommit": "8e6332eeef63335308c2a77c6772d30556bc9248"
     },
     {
       "address": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
       "protocolVersion": 1,
-      "codeHash": "0xfb6e9bf398f9be9a2b2dd44082cfb1ef3362253d4fa0243ec0c255af4717a2f4",
+      "codeHash": "0xb4e081d650f0e9166f27c9795edde0a3a6fbbc4a47375667b76c8eb39b556734",
       "contractsCommit": "c2f5605aec16d4121bd2c43354d7effef81cee95"
     }
   ],
