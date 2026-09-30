@@ -464,14 +464,15 @@ class Simulation:
         data, gas = self._estimate(sender, target, signature, *args)
         tx = {"from": sender, "to": target, "data": data, "gas": gas}
         tx_hash = self.demo.rpc("eth_sendTransaction", [tx])
-        receipt = None
-        for _ in range(20):
+        deadline = time.monotonic() + 10
+        while True:
             receipt = self.demo.rpc("eth_getTransactionReceipt", [tx_hash])
-            if receipt:
-                break
-            time.sleep(0.02)
-        require(receipt is not None and int(str(receipt["status"]), 0) == 1, "Local simulation transaction reverted.")
-        return receipt
+            if receipt is not None:
+                require(int(str(receipt["status"]), 0) == 1, f"Local simulation transaction reverted: {tx_hash}.")
+                return receipt
+            require(time.monotonic() < deadline,
+                    f"Local simulation receipt is still unavailable: {tx_hash}. Reconcile this transaction before continuing; do not resend it.")
+            time.sleep(0.05)
 
     def _prepare_actor(self, actor, manifest):
         # Anvil-only methods are never exposed through HTTP.  A fixed, impersonated

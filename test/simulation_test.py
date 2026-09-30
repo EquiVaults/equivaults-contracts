@@ -98,6 +98,44 @@ class SimulationHttpTest(unittest.TestCase):
             self.assertEqual(body["error"], "JSON command object required.")
 
 
+class SimulationReceiptTest(unittest.TestCase):
+    def controller(self, receipts):
+        controller = object.__new__(simulation.Simulation)
+        controller._estimate = mock.Mock(return_value=("0x1234", "0x186a0"))
+        controller.demo = mock.Mock()
+        def rpc(method, params):
+            if method == "eth_sendTransaction":
+                return "0x" + "a" * 64
+            self.assertEqual(method, "eth_getTransactionReceipt")
+            return next(receipts)
+        controller.demo.rpc.side_effect = rpc
+        return controller
+
+    def assert_sent_once(self, controller):
+        sends = [call for call in controller.demo.rpc.call_args_list if call.args[0] == "eth_sendTransaction"]
+        self.assertEqual(len(sends), 1)
+
+    def test_delayed_receipt_is_observed_without_resubmitting(self):
+        receipt = {"status": "0x1"}
+        controller = self.controller(iter([None] * 30 + [receipt]))
+        with mock.patch.object(simulation.time, "sleep"):
+            self.assertEqual(controller._send("sender", "target", "signature"), receipt)
+        self.assert_sent_once(controller)
+
+    def test_missing_receipt_is_uncertain_and_identifies_transaction(self):
+        controller = self.controller(iter([None]))
+        with mock.patch.object(simulation.time, "monotonic", side_effect=[0, 11]):
+            with self.assertRaisesRegex(ValueError, "receipt is still unavailable: 0x" + "a" * 64):
+                controller._send("sender", "target", "signature")
+        self.assert_sent_once(controller)
+
+    def test_failed_receipt_is_not_resubmitted(self):
+        controller = self.controller(iter([{"status": "0x0"}]))
+        with self.assertRaisesRegex(ValueError, "transaction reverted: 0x" + "a" * 64):
+            controller._send("sender", "target", "signature")
+        self.assert_sent_once(controller)
+
+
 class SimulationValidationTest(unittest.TestCase):
     def _advance_controller(self):
         bare = object.__new__(simulation.Simulation)

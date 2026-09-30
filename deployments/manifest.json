@@ -16,8 +16,8 @@
       }
     }
   },
-  "contractsCommit": "8e6332eeef63335308c2a77c6772d30556bc9248",
-  "generatedAt": "2026-09-20",
+  "contractsCommit": "bbaef9186108154f6a9ef8b6abdd67196f089f5e",
+  "generatedAt": "2026-09-30",
   "abiDir": "abi",
   "abiFiles": [
     "AssetRegistry.json",

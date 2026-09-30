@@ -26,6 +26,8 @@ The controller holds a lifetime lock scoped to the local RPC port and also seria
 
 Each `assets[]` entry contains the current pinned `oraclePrice` and pool-spot `dexPrice`, plus `history` and `projection`. `history` is recorded in the deployment-scoped metrics SQLite database only when a capture succeeds; every point carries the observed block timestamp and no earlier prices or missing days are reconstructed. The API returns at most 1,024 real points per asset: first and last observations for each of the last 366 UTC days, plus 128 recent intraday points. `projection` has day 0 through day 90 and applies the same deterministic oracle rate table and current path phase as stepped simulation. It is an oracle-only scenario from the current observed price: it is not DEX, execution, vault-NAV, PnL, or withdrawal forecast.
 
+Local transaction receipt polling uses a ten-second monotonic budget between RPC responses. Each RPC retains its own transport timeout. A missing receipt is an uncertain outcome, with the transaction hash reported for reconciliation; it is not reported as a reverted transaction and is never automatically resubmitted. Reconcile the chain before acknowledging recovery.
+
 A funded executor cycle is disabled by default. With `--run-executor --executor-config path.json`, the controller owns one existing `investor-executor.py` instance and its journal, preserves the status endpoint from the config, and invokes a cycle after each simulated day and every five seconds while idle. The config supplies only documented executor arguments and cannot select an arbitrary command.
 
 ## Advance responsiveness
