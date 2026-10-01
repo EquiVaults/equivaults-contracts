@@ -297,6 +297,49 @@ class CaptureTest(unittest.TestCase):
                 self.assertEqual(metrics.db.execute('select count(*) from breaks').fetchone()[0],1)
             finally: metrics.close()
 
+    def test_vault_history_exports_persisted_aum_and_same_block_break_order(self):
+        vault = self.VAULT
+        now = timestamp('2026-09-21')
+        class Demo:
+            def load(self):
+                return {'chainId':31337, 'factory':'factory', 'genesisHash':'genesis',
+                        'deploymentBlockHash':'anchor', 'settlementAsset':'settlement',
+                        'vaults':[{'address':vault}]}
+            def rpc(self, method, params):
+                if method == 'eth_getBlockByNumber':
+                    return {'number':'0xa', 'hash':'block10', 'timestamp':hex(now)}
+                raise AssertionError(method)
+        class Metrics(m.Metrics):
+            def read(self, target, signature, *args, block=None):
+                return {'decimals()':[6], 'totalAssets()':[300], 'totalSupply()':[100],
+                        'investmentEscrow()':[0]}[signature]
+            def ledger(self, vault, escrow):
+                return m.Ledger()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'metrics.sqlite'
+            metrics = Metrics(Demo(), path)
+            # Equal NAV can coexist with differing AUM after deposits. These
+            # persisted amounts must survive export without supply-based math.
+            metrics.db.executemany('insert into observations values(?,?,?,?,?,?)', [
+                (vault, 2, 'block2', now-86400, '100', '123456789012345678901234567890'),
+                (vault, 5, 'block5', now-100, '100', '250'),
+            ])
+            metrics.db.execute('insert into breaks values(?,?,?,?)', (vault, 5, 3, now-100))
+            metrics.db.commit()
+            metrics.close()
+            metrics = Metrics(Demo(), path)
+            try:
+                history = metrics.capture()['vaults'][0]['history']
+                self.assertEqual([point['blockNumber'] for point in history], ['2', '5', '5', '10'])
+                self.assertEqual([point['totalAssets'] for point in history], ['123456789012345678901234567890', None, '250', '300'])
+                self.assertEqual(history[0]['nav'], '100')
+                self.assertEqual(history[2]['nav'], '100')
+                self.assertEqual(history[1], {'timestamp':now-100, 'nav':'0', 'totalAssets':None,
+                                              'blockNumber':'5', 'navBreakBefore':True})
+                self.assertNotIn('navBreakBefore', history[2])
+            finally:
+                metrics.close()
+
 class CaptureReuseTest(unittest.TestCase):
     def test_same_head_reuses_only_successful_unchanged_inputs(self):
         class Demo:

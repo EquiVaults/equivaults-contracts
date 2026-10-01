@@ -360,9 +360,14 @@ class Metrics:
                 # Persist an explicit break when all shares are burned. A later
                 # first deposit must never be joined to the former share series.
                 self.db.execute('insert or replace into observations values(?,?,?,?,?,?)', (vault, self.number, self.block_hash, self.timestamp, str(nav or 0), str(total)))
-                series = [(block, 2**32, ts, n) for block, ts, n in self.db.execute('select block,ts,nav from observations where vault=?', (vault,))]
-                series += [(block, idx, ts, '0') for block, idx, ts in self.db.execute('select block,idx,ts from breaks where vault=?', (vault,))]
-                history = [{'timestamp': ts, 'nav': n} for _, _, ts, n in sorted(series)]
+                series = [(block, 2**32, ts, n, assets) for block, ts, n, assets in self.db.execute('select block,ts,nav,assets from observations where vault=?', (vault,))]
+                # A burn event proves a share-series break, not the vault AUM.
+                # Preserve the observed assets field rather than reconstructing
+                # historical AUM from NAV and the current share supply.
+                series += [(block, idx, ts, '0', None) for block, idx, ts in self.db.execute('select block,idx,ts from breaks where vault=?', (vault,))]
+                history = [{'timestamp': ts, 'nav': n, 'totalAssets': assets, 'blockNumber': str(block),
+                            **({'navBreakBefore': True} if idx != 2**32 else {})}
+                           for block, idx, ts, n, assets in sorted(series)]
                 periods = returns(history, self.timestamp)
                 if nav is None:
                     periods = {k: {**v, 'returnBps': None, 'reason': 'Vault has no shares'} for k, v in periods.items()}
